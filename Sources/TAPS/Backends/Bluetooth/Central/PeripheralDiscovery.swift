@@ -1,20 +1,17 @@
-#if canImport(DarwinGATT)
-// Bluetooth support only for Darwin currently
-#if canImport(DarwinGATT)
+import AsyncAlgorithms
 internal import Bluetooth
 internal import GATT
-internal import DarwinGATT
+
+#if canImport(DarwinGATT)
+    internal import DarwinGATT
 #elseif canImport(BluetoothLinux)
-internal import Bluetooth
-internal import BluetoothLinux
+    internal import BluetoothLinux
 #endif
 
-import AsyncAlgorithms
-
 #if canImport(FoundationEssentials)
-import FoundationEssentials
+    import FoundationEssentials
 #else
-import Foundation
+    import Foundation
 #endif
 
 extension BluetoothCentral {
@@ -24,20 +21,20 @@ extension BluetoothCentral {
                 case any
                 case named(String)
             }
-            
+
             let underlying: Underlying
-            
+
             public static var any: Reference {
                 Reference(underlying: .any)
             }
-            
+
             public static func named(_ name: String) -> Reference {
                 Reference(underlying: .named(name))
             }
         }
-        
+
         let central: BluetoothCentral
-        
+
         public nonisolated func withDiscovery(
             of reference: Reference,
             pollingInterval: Duration? = .seconds(5),
@@ -45,7 +42,7 @@ extension BluetoothCentral {
         ) async throws {
             actor Output {
                 var peers = [Peer]()
-                
+
                 func upsert(_ peer: Peer) {
                     self.peers.removeAll {
                         $0.data.peripheral == peer.data.peripheral
@@ -53,24 +50,27 @@ extension BluetoothCentral {
                     self.peers.append(peer)
                 }
             }
-            
+
             let stream = try await central.central.scan(filterDuplicates: true)
             let output = Output()
-            
+
             try await withTaskCancellationHandler {
                 for try await scanData in stream {
-                    let name = try? await central.central.name(for: scanData.peripheral)
+                    var name: String? = nil
+                    #if canImport(DarwinGATT)
+                        name = try? await central.central.name(for: scanData.peripheral)
+                    #endif
                     let peer = Peer(data: scanData, name: name)
-                    
+
                     switch reference.underlying {
                     case .any, .named(name):
                         await output.upsert(peer)
                     case .named:
                         ()
                     }
-                    
+
                     try await handleResults(output.peers)
-                    
+
                     if pollingInterval == nil {
                         stream.stop()
                     }
@@ -83,7 +83,9 @@ extension BluetoothCentral {
 }
 
 extension PeerDiscoveryMechanism where Mechanism == BluetoothCentral.PeripheralDiscovery {
-    public static var nearbyPeripherals: PeerDiscoveryMechanism<BluetoothCentral.PeripheralDiscovery> {
+    public static var nearbyPeripherals:
+        PeerDiscoveryMechanism<BluetoothCentral.PeripheralDiscovery>
+    {
         PeerDiscoveryMechanism { context in
             BluetoothCentral.PeripheralDiscovery(
                 central: context.bluetoothCentral
@@ -91,4 +93,3 @@ extension PeerDiscoveryMechanism where Mechanism == BluetoothCentral.PeripheralD
         }
     }
 }
-#endif

@@ -1,34 +1,29 @@
 #if canImport(FoundationEssentials)
-import FoundationEssentials
+    import FoundationEssentials
 #else
-import Foundation
+    import Foundation
 #endif
 
 public struct BluetoothPeripheralClientService: ClientServiceProtocol {
     public typealias Parameters = BluetoothPeripheralClientParameters
     public typealias Client = BluetoothCentral.Peripheral
-    
-    let resolve: @Sendable (TAPSContext) async throws -> UUID
-    
+
+    let resolve: @Sendable (TAPSContext) async throws -> BluetoothCentral.Peer
+
     internal init(
-        resolve: @escaping @Sendable (TAPSContext) async throws -> UUID
+        resolve: @escaping @Sendable (TAPSContext) async throws -> BluetoothCentral.Peer
     ) {
         self.resolve = resolve
     }
-    
+
     /// Create TCP client with given parameters
     public func withConnection<T: Sendable>(
         parameters: Parameters,
         context: TAPSContext,
         perform: @escaping @Sendable (Client) async throws -> T
     ) async throws -> T {
-        let deviceId = try await resolve(context)
-        guard let (device, _) = await context.bluetoothCentral.central.peripherals
-            .first(where: { $0.key.id == deviceId })
-        else {
-            throw PeerDiscoveryError()
-        }
-        
+        let device = try await resolve(context).data.peripheral
+
         return try await context.bluetoothCentral.withConnection(device) { peripheral in
             try await perform(peripheral)
         }
@@ -45,8 +40,8 @@ extension ClientServiceProtocol where Self == BluetoothPeripheralClientService {
             guard let peer = peers.first else {
                 throw PeerDiscoveryError.cannotResolve()
             }
-            
-            return peer.id
+
+            return peer
         }
     }
 }

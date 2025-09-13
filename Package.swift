@@ -6,11 +6,11 @@ import PackageDescription
 let package = Package(
     name: "TAPS",
     platforms: [
-        .macOS(.v15),
+        .macOS("26.0"),
         .iOS(.v18),
         .tvOS(.v18),
         .watchOS(.v10),
-        .visionOS(.v1)
+        .visionOS(.v1),
     ],
     products: [
         .library(
@@ -25,6 +25,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
         .package(url: "https://github.com/PureSwift/Bluetooth.git", from: "7.2.3"),
         .package(url: "https://github.com/PureSwift/GATT.git", from: "3.3.1"),
+        .package(
+            url: "https://github.com/PureSwift/BluetoothLinux.git",
+            revision: "077f9d36afdae57e12c436842db56ef318e2fd23"),
         // Public dependencies
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.8.0"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.4.0"),
@@ -34,9 +37,11 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-async-dns-resolver.git", from: "0.4.0"),
     ],
     targets: [
-        .executableTarget(name: "TAPSExample", dependencies: [
-            "TAPS"
-        ]),
+        .executableTarget(
+            name: "TAPSExample",
+            dependencies: [
+                "TAPS"
+            ]),
         .target(
             name: "TAPS",
             dependencies: [
@@ -51,8 +56,14 @@ let package = Package(
                 .product(name: "AsyncDNSResolver", package: "swift-async-dns-resolver"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "Bluetooth", package: "Bluetooth"),
-                .product(name: "GATT", package: "GATT", condition: .when(platforms: [.macOS, .linux])),
-                .product(name: "DarwinGATT", package: "GATT", condition: .when(platforms: [.macOS])),
+                .product(
+                    name: "BluetoothLinux", package: "BluetoothLinux",
+                    condition: .when(platforms: [.linux])),
+                .product(
+                    name: "GATT", package: "GATT",
+                    condition: .when(platforms: [.macOS, .linux])),
+                .product(
+                    name: "DarwinGATT", package: "GATT", condition: .when(platforms: [.macOS])),
                 // Public dependencies
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),

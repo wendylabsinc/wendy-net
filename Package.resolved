@@ -1,13 +1,21 @@
 {
-  "originHash" : "837166cb5d58bc6b421ad4193cd1af5115fefb0435248056eddc8b78b658e415",
+  "originHash" : "f7e795ae08297bebe0f61ce58e860c0a2792ed24df103ec74666ecb01111fc47",
   "pins" : [
     {
       "identity" : "bluetooth",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/PureSwift/Bluetooth.git",
       "state" : {
-        "revision" : "52f228b819e8ef920e4232cc37c9a84ffbbc5707",
-        "version" : "7.2.3"
+        "branch" : "master",
+        "revision" : "52f228b819e8ef920e4232cc37c9a84ffbbc5707"
+      }
+    },
+    {
+      "identity" : "bluetoothlinux",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/BluetoothLinux.git",
+      "state" : {
+        "revision" : "077f9d36afdae57e12c436842db56ef318e2fd23"
       }
     },
     {
@@ -17,6 +25,15 @@
       "state" : {
         "revision" : "8f9b5f21faf8995d5f72c64712d54afc81f895c1",
         "version" : "3.3.1"
+      }
+    },
+    {
+      "identity" : "socket",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/Socket.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "85fdcac657041100365190a02c70a72146fadaf0"
       }
     },
     {

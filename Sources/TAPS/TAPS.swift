@@ -1,32 +1,39 @@
 // TAPS.swift
 
 import Logging
+import ServiceLifecycle
 
 @available(macOS 15.0, *)
 public actor TAPS {
     private let logger = Logger(label: "engineer.edge.taps.main")
     private let tapsContext: TAPSContext
-    
+
     /// Initialize TAPS instance
     public init() async throws {
-        #if canImport(DarwinGATT)
         self.tapsContext = try await TAPSContext(
             bluetoothPeripheral: BluetoothPeripheral(),
             bluetoothCentral: BluetoothCentral()
         )
-        #else
-        self.tapsContext = TAPSContext()
-        #endif
     }
-    
+
     /// Run TAPS as a service
     public func run() async throws {
-        // Service event loop
-        while true {
-            try await Task.sleep(for: .milliseconds(100))
+        try await gracefulShutdown()
+    }
+
+    public func advertiseBluetooth<each Service: BluetoothServiceProtocol>(
+        localName: String?,
+        services: repeat each Service
+    ) async throws {
+        try await tapsContext.bluetoothPeripheral.run(
+            localName: localName
+        ) { registration in
+            for service in repeat each services {
+                try await registration.register(service)
+            }
         }
     }
-    
+
     /// Generic withConnection method with default parameters
     public func withConnection<Service: ClientServiceProtocol, T: Sendable>(
         to service: Service,
@@ -38,7 +45,7 @@ public actor TAPS {
             operation
         )
     }
-    
+
     /// Generic withConnection method with explicit parameters
     public func withConnection<Service: ClientServiceProtocol, T: Sendable>(
         to service: Service,
@@ -53,13 +60,13 @@ public actor TAPS {
                 taskGroup.addTask {
                     try await client.run()
                 }
-                
+
                 defer { taskGroup.cancelAll() }
                 return try await operation(client)
             }
         }
     }
-    
+
     // MARK: - Server Support
 
     public nonisolated func withServer<Service: ServerServiceProtocol>(
@@ -72,7 +79,7 @@ public actor TAPS {
             acceptClient: acceptClient
         )
     }
-    
+
     public nonisolated func withServer<Service: ServerServiceProtocol>(
         on service: Service,
         parameters: Service.Parameters,
@@ -88,7 +95,7 @@ public actor TAPS {
                         taskGroup.addTask {
                             try await client.run()
                         }
-                        
+
                         defer { taskGroup.cancelAll() }
                         return try await acceptClient(client)
                     }
