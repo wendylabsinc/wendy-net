@@ -155,9 +155,9 @@ public actor BluetoothCentral {
             }
         #endif
         
-        let logger = Logger(label: "engineer.edge.taps.bluetooth.peripheral")
+        let logger = Logger(label: "engineer.edge.taps.bluetooth.central")
         self.central.log = { string in
-            logger.info("\(string)")
+            logger.trace("\(string)")
         }
     }
 

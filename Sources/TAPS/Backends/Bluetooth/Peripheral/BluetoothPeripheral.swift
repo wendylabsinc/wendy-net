@@ -154,7 +154,7 @@ public actor BluetoothPeripheral {
         
         let logger = Logger(label: "engineer.edge.taps.bluetooth.peripheral")
         self.peripheral.log = { string in
-            logger.info("\(string)")
+            logger.trace("\(string)")
         }
     }
     
