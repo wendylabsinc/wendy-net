@@ -1,6 +1,7 @@
 import AsyncAlgorithms
 internal import Bluetooth
 internal import GATT
+import Logging
 import ServiceLifecycle
 
 #if canImport(DarwinGATT)
@@ -153,6 +154,11 @@ public actor BluetoothCentral {
                 }
             }
         #endif
+        
+        let logger = Logger(label: "engineer.edge.taps.bluetooth.peripheral")
+        self.central.log = { string in
+            logger.info("\(string)")
+        }
     }
 
     public func listServices(for peer: Peer) async throws -> [BluetoothService] {

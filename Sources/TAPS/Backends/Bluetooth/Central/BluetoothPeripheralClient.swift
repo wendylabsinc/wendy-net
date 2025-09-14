@@ -83,8 +83,13 @@ extension BluetoothCentral.Peripheral {
             forCharacteristic characteristic: Characteristic,
             perform: (borrowing Span<UInt8>) async throws -> Void
         ) async throws {
+            #if canImport(DarwinGATT)
             let notifications = try await self.central.central.notify(
                 for: characteristic.underlying)
+            #else
+            let notifications = self.central.central.notify(
+                for: characteristic.underlying)
+            #endif
             for try await notification in notifications {
                 try await perform(notification.span)
             }
@@ -132,7 +137,7 @@ extension BluetoothCentral.Peripheral {
             }
 
             let characteristics = try await central.central.discoverCharacteristics(
-                [characteristic.id.uuid],
+                [],
                 for: services[0]
             )
 

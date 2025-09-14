@@ -30,10 +30,19 @@ public enum Characteristics {
             self.level = level
         }
     }
+    
+    public struct LocalName: Sendable {
+        public let name: String
+        
+        public init(name: String) {
+            self.name = name
+        }
+    }
 }
 
 public enum BluetoothServices {
     public static let battery = BluetoothUUID(uuid: .bit16(0x180f))
+    public static let genericAccess = BluetoothUUID(uuid: .bit16(0x1800))
 }
 
 extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
@@ -53,6 +62,21 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
         return { write in
             let array = InlineArray<1, UInt8>(repeating: value.level)
             write(array.span)
+        }
+    }
+}
+
+extension BluetoothCharacteristic<Characteristics.LocalName> {
+    public static let localName = BluetoothCharacteristic(
+        id: BluetoothUUID(uuid: .bit16(0x2a00)),
+        serviceId: BluetoothServices.genericAccess
+    ) { span in
+        let span = try UTF8Span(validating: span)
+        let name = String(copying: span)
+        return Characteristics.LocalName(name: name)
+    } write: { value in
+        return { write in
+            write(value.name.utf8Span.span)
         }
     }
 }

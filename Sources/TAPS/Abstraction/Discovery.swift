@@ -26,6 +26,7 @@ extension PeerDiscoveryMechanismProtocol {
             ) { results in
                 await output.update(to: results)
                 if !results.isEmpty {
+                    // TODO: Remove this workaround
                     throw CancellationError()
                 }
             }

@@ -38,7 +38,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "TAPSExample",
+            name: "TAPSBluetoothExample",
             dependencies: [
                 "TAPS"
             ]),

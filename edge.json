@@ -1,0 +1,14 @@
+{
+    "appId": "com.example.taps-app",
+    "version": "1.0.0",
+    "entitlements": [
+        {
+            "type": "network",
+            "mode": "host"
+        },
+        {
+            "type": "bluetooth",
+            "mode": "kernel"
+        }
+    ]
+}

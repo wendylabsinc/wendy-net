@@ -2,7 +2,7 @@ import Foundation
 import TAPS
 
 let taps = try await TAPS()
-let name = "EdgeOS Device"
+let name = "MyGatt"
 let testServiceId = BluetoothUUID(uuid: UUID(uuidString: "40A74DF2-E238-421D-AE7F-7F3562E8FF6E")!)
 let testCharacteristicId = BluetoothUUID(
     uuid: UUID(uuidString: "40A74DF2-E238-421D-AE7F-7F3562E8FF6F")!)
@@ -19,42 +19,43 @@ try await withThrowingTaskGroup { group in
 
     if isPeripheral {
         group.addTask {
-            try await taps.withConnection(
-                to: .bluetoothPeripheral(.named(name))
-            ) { peripheral in
-                print("Connected to \"\(name)\"")
-
-                guard
-                    let characteristic = try await peripheral.getCharacteristic(
-                        testCharacteristicId,
-                        forService: testServiceId
-                    )
-                else {
-                    return
-                }
-
-                if #available(macOS 26.0, *) {
-                    var data = [UInt8]()
-                    for i: UInt8 in 0...255 {
-                        data.append(i)
-                        try await peripheral.writeNotification(
-                            forCharacteristic: characteristic,
-                            data.span
-                        )
-                    }
-                }
-
-                try await peripheral.observeCharacteristic(.batteryLevel) { battery in
-                    print(battery.level)
-                }
-            }
-        }
-    } else {
-        group.addTask {
             try await taps.advertiseBluetooth(
                 localName: name,
                 services: FakeBatteryService()
             )
+        }
+    } else {
+        group.addTask {
+            try await taps.withConnection(
+                to: .bluetoothPeripheral(.named(name))
+            ) { peripheral in
+                print("Connected to \"\(name)\"")
+                
+                try await peripheral.observeCharacteristic(.fakeBatteryLevel) { battery in
+                    print(battery.level)
+                }
+
+                // GATT
+//                guard
+//                    let characteristic = try await peripheral.getCharacteristic(
+//                        testCharacteristicId,
+//                        forService: testServiceId
+//                    )
+//                else {
+//                    return
+//                }
+//
+//                if #available(macOS 26.0, *) {
+//                    var data = [UInt8]()
+//                    for i: UInt8 in 0...255 {
+//                        data.append(i)
+//                        try await peripheral.writeNotification(
+//                            forCharacteristic: characteristic,
+//                            data.span
+//                        )
+//                    }
+//                }
+            }
         }
     }
 
@@ -70,22 +71,32 @@ try await withThrowingTaskGroup { group in
 
 public struct FakeBatteryService: BluetoothServiceProtocol {
     public var id: BluetoothUUID { testServiceId }
+    public static var characteristic: BluetoothCharacteristic<Characteristics.BatteryLevel> {
+        BluetoothCharacteristic.fakeBatteryLevel
+    }
 
     public func writeCharacteristics(
         into writer: inout BluetoothCharacteristicsWriter
     ) async throws {
-        try writer.add(
-            .batteryLevel,
-            value: .init(level: 82),
+        try await writer.add(
+            service: self,
+            initialValue: .init(level: 82),
             permissions: .read,
             properties: .read
         )
+    }
+    
+    public func withValues(_ events: (Value) async throws -> Void) async throws {
+        while !Task.isShuttingDownGracefully && !Task.isCancelled {
+            try await events(.init(level: 82))
+            try await Task.sleep(for: .seconds(1))
+        }
     }
 }
 
 struct CharacteristicParsingError: Error {}
 extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
-    public static let fakeBtteryLevel = BluetoothCharacteristic(
+    public static let fakeBatteryLevel = BluetoothCharacteristic(
         id: testCharacteristicId,
         serviceId: testServiceId
     ) { span in
