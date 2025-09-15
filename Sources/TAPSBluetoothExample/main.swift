@@ -1,5 +1,7 @@
 import Foundation
 import TAPS
+import Observation
+import Synchronization
 
 let taps = try await TAPS()
 let name = "MyGatt"
@@ -9,8 +11,14 @@ let testCharacteristicId = BluetoothUUID(
 #if os(Linux)
     let isPeripheral = true
 #else
-    let isPeripheral = false
+    let isPeripheral = true
 #endif
+
+
+@Observable
+final class Metrics: @unchecked Sendable {
+    var secondsAgo: UInt64 = 0
+}
 
 try await withThrowingTaskGroup { group in
     group.addTask {
@@ -18,51 +26,91 @@ try await withThrowingTaskGroup { group in
     }
 
     if isPeripheral {
+        let entity = Metrics()
         group.addTask {
             try await taps.advertiseBluetooth(
                 localName: name,
-                services: FakeBatteryService()
+                services: MetricsBluetoothService(
+                    serviceId: testServiceId,
+                    observing: entity,
+                    observations: MetricsBluetoothService.Observation(
+                        keyPath: \.secondsAgo,
+                        characteristic: .seconds
+                    )
+                )
             )
         }
+        
+        group.addTask {
+            while !Task.isCancelled {
+                entity.secondsAgo += 1
+                try await Task.sleep(for: .seconds(1))
+            }
+        }
+        
+//        group.addTask {
+//            while !Task.isCancelled {
+//                do {
+//                    try await taps.withConnection(
+//                        to: .gattCentral()
+//                    ) { connection in
+//                        print("Received connection")
+////                        Task {
+////                            if #available(macOS 26.0, *) {
+////                                for i in 0...255 {
+////                                    try await connection.send(NetworkOutputBytes(string: "Hello \(i)"))
+////                                    try await Task.sleep(for: .seconds(1))
+////                                }
+////                            }
+////                        }
+//                        
+//                        try await connection.withEachMessage { span in
+//                            span.withUnsafeBytes { buffer in
+//                                print(Array(buffer))
+//                            }
+//                        }
+//                    }
+//                } catch {
+//                    print(error)
+//                }
+//            }
+//        }
     } else {
         group.addTask {
             try await taps.withConnection(
                 to: .bluetoothPeripheral(.named(name))
             ) { peripheral in
                 print("Connected to \"\(name)\"")
-                
-                try await peripheral.observeCharacteristic(.fakeBatteryLevel) { battery in
-                    print(battery.level)
-                }
 
                 // GATT
-//                guard
-//                    let characteristic = try await peripheral.getCharacteristic(
-//                        testCharacteristicId,
-//                        forService: testServiceId
-//                    )
-//                else {
-//                    return
-//                }
-//
-//                if #available(macOS 26.0, *) {
-//                    var data = [UInt8]()
-//                    for i: UInt8 in 0...255 {
-//                        data.append(i)
-//                        try await peripheral.writeNotification(
-//                            forCharacteristic: characteristic,
-//                            data.span
-//                        )
-//                    }
-//                }
+                guard
+                    let characteristic = try await peripheral.getCharacteristic(
+                        testCharacteristicId,
+                        forService: testServiceId
+                    )
+                else {
+                    return
+                }
+
+                if #available(macOS 26.0, *) {
+                    var data = [UInt8]()
+                    for i: UInt8 in 0...255 {
+                        data.append(i)
+                        try await peripheral.writeNotification(
+                            forCharacteristic: characteristic,
+                            data.span
+                        )
+                    }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
             }
         }
     }
 
-    group.addTask {
-        // Cancel the example after 60s
-        try await Task.sleep(for: .seconds(60))
-    }
+//    group.addTask {
+//        // Cancel the example after 60s
+//        try await Task.sleep(for: .seconds(60))
+//    }
 
     try await group.next()
 
@@ -79,18 +127,17 @@ public struct FakeBatteryService: BluetoothServiceProtocol {
         into writer: inout BluetoothCharacteristicsWriter
     ) async throws {
         try await writer.add(
-            service: self,
+            characteristic: Self.characteristic,
             initialValue: .init(level: 82),
+            withValues: { handle in
+                while !Task.isShuttingDownGracefully && !Task.isCancelled {
+                    try await handle(.init(level: 82))
+                    try await Task.sleep(for: .seconds(1))
+                }
+            },
             permissions: .read,
             properties: .read
         )
-    }
-    
-    public func withValues(_ events: (Value) async throws -> Void) async throws {
-        while !Task.isShuttingDownGracefully && !Task.isCancelled {
-            try await events(.init(level: 82))
-            try await Task.sleep(for: .seconds(1))
-        }
     }
 }
 
@@ -111,7 +158,25 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
     } write: { value in
         return { write in
             let array = InlineArray<1, UInt8>(repeating: value.level)
-            write(array.span)
+            write(array.span.bytes)
+        }
+    }
+}
+
+extension BluetoothCharacteristic<UInt64> {
+    public static let seconds = BluetoothCharacteristic(
+        id: testCharacteristicId,
+        serviceId: testServiceId
+    ) { span in
+        guard span.count == 8 else {
+            throw CharacteristicParsingError()
+        }
+
+        return span.bytes.unsafeLoad(as: UInt64.self)
+    } write: { value in
+        return { write in
+            let array = InlineArray<1, UInt64>(repeating: value)
+            write(array.span.bytes)
         }
     }
 }
