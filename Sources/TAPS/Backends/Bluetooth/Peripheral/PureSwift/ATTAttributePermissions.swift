@@ -11,43 +11,45 @@
 @frozen
 public struct ATTAttributePermissions: OptionSet, Equatable, Hashable, Sendable {
 
-    public let rawValue: UInt8
+  public let rawValue: UInt8
 
-    public init(rawValue: UInt8) {
-        self.rawValue = rawValue
-    }
+  public init(rawValue: UInt8) {
+    self.rawValue = rawValue
+  }
 }
 
 // MARK: - ExpressibleByIntegerLiteral
 
 extension ATTAttributePermissions: ExpressibleByIntegerLiteral {
 
-    public init(integerLiteral value: UInt8) {
-        self.rawValue = value
-    }
+  public init(integerLiteral value: UInt8) {
+    self.rawValue = value
+  }
 }
 
 // MARK: - Options
 
-public extension ATTAttributePermissions {
+extension ATTAttributePermissions {
 
-    // Access
-    static var read: ATTAttributePermissions { 0x01 }
-    static var write: ATTAttributePermissions { 0x02 }
+  // Access
+  public static var read: ATTAttributePermissions { 0x01 }
+  public static var write: ATTAttributePermissions { 0x02 }
 
-    // Encryption
-    static var encrypt: ATTAttributePermissions { [.readEncrypt, .writeEncrypt] }
-    static var readEncrypt: ATTAttributePermissions { 0x04 }
-    static var writeEncrypt: ATTAttributePermissions { 0x08 }
+  // Encryption
+  public static var encrypt: ATTAttributePermissions { [.readEncrypt, .writeEncrypt] }
+  public static var readEncrypt: ATTAttributePermissions { 0x04 }
+  public static var writeEncrypt: ATTAttributePermissions { 0x08 }
 
-    // The following have no effect on Darwin
+  // The following have no effect on Darwin
 
-    // Authentication
-    static var authentication: ATTAttributePermissions { [.readAuthentication, .writeAuthentication] }
-    static var readAuthentication: ATTAttributePermissions { 0x10 }
-    static var writeAuthentication: ATTAttributePermissions { 0x20 }
+  // Authentication
+  public static var authentication: ATTAttributePermissions {
+    [.readAuthentication, .writeAuthentication]
+  }
+  public static var readAuthentication: ATTAttributePermissions { 0x10 }
+  public static var writeAuthentication: ATTAttributePermissions { 0x20 }
 
-    // Authorization
-    static var authorized: ATTAttributePermissions { 0x40 }
-    static var noAuthorization: ATTAttributePermissions { 0x80 }
+  // Authorization
+  public static var authorized: ATTAttributePermissions { 0x40 }
+  public static var noAuthorization: ATTAttributePermissions { 0x80 }
 }

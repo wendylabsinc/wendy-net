@@ -1,5 +1,5 @@
 {
-  "originHash" : "f7e795ae08297bebe0f61ce58e860c0a2792ed24df103ec74666ecb01111fc47",
+  "originHash" : "41c32debe3d2361813507f9c9e4f5e5aea14c1dcd65b83ded4b09adbc6a77d79",
   "pins" : [
     {
       "identity" : "bluetooth",
@@ -142,6 +142,15 @@
       "state" : {
         "revision" : "ce592ae52f982c847a4efc0dd881cc9eb32d29f2",
         "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swift-metrics",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-metrics.git",
+      "state" : {
+        "revision" : "4c83e1cdf4ba538ef6e43a9bbd0bcc33a0ca46e3",
+        "version" : "2.7.0"
       }
     },
     {

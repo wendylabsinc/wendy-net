@@ -1,49 +1,49 @@
 internal import Bluetooth
 
 #if canImport(FoundationEssentials)
-    import FoundationEssentials
+  import FoundationEssentials
 #else
-    import Foundation
+  import Foundation
 #endif
 
 public struct BluetoothUUID: Sendable, Hashable, CustomDebugStringConvertible {
-    internal let uuid: Bluetooth.BluetoothUUID
+  internal let uuid: Bluetooth.BluetoothUUID
 
-    public var description: String { uuid.rawValue }
+  public var description: String { uuid.rawValue }
 
-    public var debugDescription: String {
-        uuid.description
-    }
+  public var debugDescription: String {
+    uuid.description
+  }
 
-    internal init(uuid: Bluetooth.BluetoothUUID) {
-        self.uuid = uuid
-    }
+  internal init(uuid: Bluetooth.BluetoothUUID) {
+    self.uuid = uuid
+  }
 
-    public init() {
-        self.uuid = Bluetooth.BluetoothUUID()
-    }
+  public init() {
+    self.uuid = Bluetooth.BluetoothUUID()
+  }
 
-    public init(uuid: UUID) {
-        self.uuid = Bluetooth.BluetoothUUID(uuid: uuid)
-    }
+  public init(uuid: UUID) {
+    self.uuid = Bluetooth.BluetoothUUID(uuid: uuid)
+  }
 }
 
 public struct RSSI: Sendable {
-    public let rawValue: Int8
+  public let rawValue: Int8
 
-    internal init(unchecked: Int8) {
-        self.rawValue = unchecked
-    }
+  internal init(unchecked: Int8) {
+    self.rawValue = unchecked
+  }
 
-    public init?(_ rawValue: Int8) {
-        guard -127 <= rawValue, rawValue <= +20 else { return nil }
+  public init?(_ rawValue: Int8) {
+    guard -127 <= rawValue, rawValue <= +20 else { return nil }
 
-        self.rawValue = rawValue
-    }
+    self.rawValue = rawValue
+  }
 
-    public init?(_ rawValue: Double) {
-        guard -127 <= rawValue, rawValue <= +20 else { return nil }
+  public init?(_ rawValue: Double) {
+    guard -127 <= rawValue, rawValue <= +20 else { return nil }
 
-        self.rawValue = Int8(clamping: Int(rawValue))
-    }
+    self.rawValue = Int8(clamping: Int(rawValue))
+  }
 }
