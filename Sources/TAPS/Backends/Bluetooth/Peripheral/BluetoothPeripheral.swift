@@ -1,5 +1,6 @@
 internal import Bluetooth
 import Logging
+import AsyncAlgorithms
 internal import GATT
 import ServiceLifecycle
 
@@ -21,73 +22,97 @@ import ServiceLifecycle
     
 public struct BluetoothCharacteristicsWriter: ~Copyable {
     internal typealias Underlying = GATTAttribute<Data>.Characteristic
+    public typealias ProduceEvents<Value: Sendable> = @Sendable (Value) async throws -> Void
     
     internal let peripheral: BluetoothPeripheral
     internal var taskGroup: ThrowingDiscardingTaskGroup<any Error>
     let registerCharacteristics:
         @Sendable (BluetoothUUID, borrowing BluetoothCharacteristicsWriter) async throws -> (UInt16, [UInt16])
     internal var characteristics = [Underlying]()
+    
+    public struct RegisteringCharacteristic<Value: Sendable>: Sendable {
+        public var characteristic: BluetoothCharacteristic<Value>
+        public var initialValue: Value
+        public var withValues: @Sendable (ProduceEvents<Value>) async throws -> Void
+        public var permissions: ATTAttributePermissions
+        public var properties: GATTCharacteristicProperties
+    }
 
-    public mutating func add<Service: BluetoothServiceProtocol>(
-        service: Service,
-        initialValue: Service.Value,
-        permissions: ATTAttributePermissions,
-        properties: GATTCharacteristicProperties
+    public mutating func add<each Value: Sendable>(
+        serviceId: BluetoothUUID,
+        characteristics: repeat RegisteringCharacteristic<each Value>
     ) async throws {
-        let characteristic = Service.characteristic
-        let write = characteristic.write(initialValue)
-        write { span in
-            let underlying = Underlying(
-                uuid: Service.characteristic.id.uuid,
-                value: span.withUnsafeBytes { buffer in
-                    Data(buffer)
-                },
-                permissions: .init(rawValue: permissions.rawValue),
-                properties: .init(rawValue: properties.rawValue),
-                descriptors: []  // TODO: Support
-            )
-            self.characteristics.append(underlying)
-        }
-        
-        let (_, characteristicsHandles) = try await registerCharacteristics(service.id, self)
-        
-        taskGroup.addTask { [peripheral, service] in
-            guard characteristicsHandles.count == 1 else {
-                preconditionFailure("characteristicsHandles.count should have been 1, as 1 characteristic was registered")
+        for registration in repeat each characteristics {
+            precondition(serviceId == registration.characteristic.serviceId, "ServiceID did not match that specified in the characteristic")
+            
+            let write = registration.characteristic.write(registration.initialValue)
+            write { span in
+                let underlying = Underlying(
+                    uuid: registration.characteristic.id.uuid,
+                    value: span.withUnsafeBytes { buffer in
+                        Data(buffer)
+                    },
+                    permissions: .init(rawValue: registration.permissions.rawValue),
+                    properties: .init(rawValue: registration.properties.rawValue),
+                    descriptors: []  // TODO: Support
+                )
+                self.characteristics.append(underlying)
             }
             
-            let handle = characteristicsHandles[0]
+            let (_, characteristicsHandles) = try await registerCharacteristics(registration.characteristic.serviceId, self)
             
-            try await service.withValues { event in
-                var data = Data()
-                let write = characteristic.write(event)
-                
-                write { span in
-                    data = span.withUnsafeBytes { buffer in
-                        Data(buffer)
-                    }
+            taskGroup.addTask { [peripheral] in
+                guard characteristicsHandles.count == 1 else {
+                    preconditionFailure("characteristicsHandles.count should have been 1, as 1 characteristic was registered")
                 }
                 
-                try await peripheral.writeValue(
-                    data,
-                    to: handle
-                )
+                let handle = characteristicsHandles[0]
+                
+                try await registration.withValues { event in
+                    var data = Data()
+                    let write = registration.characteristic.write(event)
+                    
+                    write { span in
+                        data = span.withUnsafeBytes { buffer in
+                            Data(buffer)
+                        }
+                    }
+                    
+                    try await peripheral.writeValue(
+                        data,
+                        to: handle
+                    )
+                }
             }
         }
     }
+    
+    public mutating func add<Value: Sendable>(
+        characteristic: BluetoothCharacteristic<Value>,
+        initialValue: Value,
+        withValues: @Sendable @escaping (ProduceEvents<Value>) async throws -> Void,
+        permissions: ATTAttributePermissions,
+        properties: GATTCharacteristicProperties
+    ) async throws {
+        try await add(
+            serviceId: characteristic.serviceId,
+            characteristics: RegisteringCharacteristic(
+                characteristic: characteristic,
+                initialValue: initialValue,
+                withValues: withValues,
+                permissions: permissions,
+                properties: properties
+            )
+        )
+    }
 }
 
-public protocol BluetoothServiceProtocol: Sendable, ~Copyable {
-    associatedtype Value: Sendable
-    
+public protocol BluetoothServiceProtocol: Sendable {
     var id: BluetoothUUID { get }
-    static var characteristic: BluetoothCharacteristic<Value> { get }
 
     func writeCharacteristics(
         into writer: inout BluetoothCharacteristicsWriter
     ) async throws
-    
-    func withValues(_ events: (Value) async throws -> Void) async throws
 }
 
 public actor BluetoothPeripheral {
@@ -123,6 +148,13 @@ public actor BluetoothPeripheral {
     #endif
 
     private let peripheral: _Peripheral
+    private nonisolated let inboundWrapper = InboundWrapper()
+    
+    private final class InboundWrapper: @unchecked Sendable {
+        var inbound: AsyncChannel<Data>?
+        
+        init() {}
+    }
 
     internal init() async throws {
         #if canImport(DarwinGATT)
@@ -154,7 +186,19 @@ public actor BluetoothPeripheral {
         
         let logger = Logger(label: "engineer.edge.taps.bluetooth.peripheral")
         self.peripheral.log = { string in
-            logger.trace("\(string)")
+            logger.error("\(string)")
+        }
+    }
+    
+    internal nonisolated func read(
+        characteristicId: BluetoothUUID,
+        into inbound: AsyncChannel<Data>
+    ) {
+        self.peripheral.willRead = { read in
+            Task {
+                await inbound.send(read.value)
+            }
+            return nil
         }
     }
     

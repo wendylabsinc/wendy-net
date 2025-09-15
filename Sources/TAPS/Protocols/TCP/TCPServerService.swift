@@ -19,7 +19,7 @@ public struct TCPServerService<
     
     public init(
         host: String,
-        port: Int,s
+        port: Int,
         protocolStack: ProtocolStack<NetworkInputBytes, InboundMessage, OutboundMessage, NetworkOutputBytes>
     ) {
         self.host = host
