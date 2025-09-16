@@ -1,6 +1,41 @@
 {
-  "originHash" : "04d39160d332a9d1c5817d5e32622f69feed3f8baa6c8d504935120a8726080c",
+  "originHash" : "41c32debe3d2361813507f9c9e4f5e5aea14c1dcd65b83ded4b09adbc6a77d79",
   "pins" : [
+    {
+      "identity" : "bluetooth",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/Bluetooth.git",
+      "state" : {
+        "branch" : "master",
+        "revision" : "52f228b819e8ef920e4232cc37c9a84ffbbc5707"
+      }
+    },
+    {
+      "identity" : "bluetoothlinux",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/BluetoothLinux.git",
+      "state" : {
+        "revision" : "077f9d36afdae57e12c436842db56ef318e2fd23"
+      }
+    },
+    {
+      "identity" : "gatt",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/GATT.git",
+      "state" : {
+        "revision" : "8f9b5f21faf8995d5f72c64712d54afc81f895c1",
+        "version" : "3.3.1"
+      }
+    },
+    {
+      "identity" : "socket",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/PureSwift/Socket.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "85fdcac657041100365190a02c70a72146fadaf0"
+      }
+    },
     {
       "identity" : "swift-algorithms",
       "kind" : "remoteSourceControl",
@@ -110,6 +145,15 @@
       }
     },
     {
+      "identity" : "swift-metrics",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-metrics.git",
+      "state" : {
+        "revision" : "4c83e1cdf4ba538ef6e43a9bbd0bcc33a0ca46e3",
+        "version" : "2.7.0"
+      }
+    },
+    {
       "identity" : "swift-nio",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
@@ -161,6 +205,15 @@
       "state" : {
         "revision" : "e7187309187695115033536e8fc9b2eb87fd956d",
         "version" : "2.8.0"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "f99ae8aa18f0cf0d53481901f88a0991dc3bd4a2",
+        "version" : "601.0.1"
       }
     },
     {
