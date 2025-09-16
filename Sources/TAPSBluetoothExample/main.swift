@@ -11,12 +11,13 @@ let testCharacteristicId = BluetoothUUID(
 #if os(Linux)
   let isPeripheral = true
 #else
-  let isPeripheral = true
+  let isPeripheral = false
 #endif
 
 @Observable
 final class Metrics: @unchecked Sendable {
-  var secondsAgo: UInt64 = 0
+  var batteryLevel = Characteristics.BatteryLevel(level: 82)
+  var heartbeat: UInt64 = 255
 }
 
 try await withThrowingTaskGroup { group in
@@ -33,8 +34,12 @@ try await withThrowingTaskGroup { group in
           serviceId: testServiceId,
           observing: entity,
           observations: MetricsBluetoothService.Observation(
-            keyPath: \.secondsAgo,
-            characteristic: .seconds
+            keyPath: \.batteryLevel,
+            characteristic: .batteryLevel
+          ),
+          MetricsBluetoothService.Observation(
+            keyPath: \.heartbeat,
+            characteristic: .heartbeat
           )
         )
       )
@@ -42,44 +47,30 @@ try await withThrowingTaskGroup { group in
 
     group.addTask {
       while !Task.isCancelled {
-        entity.secondsAgo += 1
+        entity.heartbeat = .random(in: 40..<150)
+        entity.batteryLevel = .init(level: .random(in: 0...100))
         try await Task.sleep(for: .seconds(1))
       }
     }
-
-    //        group.addTask {
-    //            while !Task.isCancelled {
-    //                do {
-    //                    try await taps.withConnection(
-    //                        to: .gattCentral()
-    //                    ) { connection in
-    //                        print("Received connection")
-    ////                        Task {
-    ////                            if #available(macOS 26.0, *) {
-    ////                                for i in 0...255 {
-    ////                                    try await connection.send(NetworkOutputBytes(string: "Hello \(i)"))
-    ////                                    try await Task.sleep(for: .seconds(1))
-    ////                                }
-    ////                            }
-    ////                        }
-    //
-    //                        try await connection.withEachMessage { span in
-    //                            span.withUnsafeBytes { buffer in
-    //                                print(Array(buffer))
-    //                            }
-    //                        }
-    //                    }
-    //                } catch {
-    //                    print(error)
-    //                }
-    //            }
-    //        }
   } else {
+    try await taps.withConnection(
+      to: .tcp(
+        to: .srv(to: "_myprotocol.local"),
+        resolver: .mdns
+      )
+    ) { client in
+      // use TCP connection
+    }
+
     group.addTask {
       try await taps.withConnection(
         to: .bluetoothPeripheral(.named(name))
       ) { peripheral in
         print("Connected to \"\(name)\"")
+
+        try await peripheral.observeCharacteristic(.fakeBatteryLevel) { batteryLevel in
+          print(batteryLevel)
+        }
 
         // GATT
         guard
@@ -105,11 +96,6 @@ try await withThrowingTaskGroup { group in
       }
     }
   }
-
-  //    group.addTask {
-  //        // Cancel the example after 60s
-  //        try await Task.sleep(for: .seconds(60))
-  //    }
 
   try await group.next()
 
@@ -163,7 +149,7 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
 }
 
 extension BluetoothCharacteristic<UInt64> {
-  public static let seconds = BluetoothCharacteristic(
+  public static let heartbeat = BluetoothCharacteristic(
     id: testCharacteristicId,
     serviceId: testServiceId
   ) { span in

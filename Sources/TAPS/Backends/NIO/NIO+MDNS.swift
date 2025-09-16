@@ -17,7 +17,7 @@ public actor MDNSClient: PeerDiscoveryMechanismProtocol {
       Reference(underlying: .ptr(host))
     }
   }
-  public struct Peer: Sendable {
+  public struct Peer: Sendable, InternetHost {
     public let hostname: String
     public let port: Int
   }

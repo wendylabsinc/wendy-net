@@ -78,79 +78,77 @@ extension BluetoothCentral.Peripheral {
     return nil
   }
 
-  #if swift(>=6.2)
-    public func readNotifications(
-      forCharacteristic characteristic: Characteristic,
-      perform: (borrowing Span<UInt8>) async throws -> Void
-    ) async throws {
-      #if canImport(DarwinGATT)
-        let notifications = try await self.central.central.notify(
-          for: characteristic.underlying)
-      #else
-        let notifications = self.central.central.notify(
-          for: characteristic.underlying)
-      #endif
-      for try await notification in notifications {
-        try await perform(notification.span)
-      }
+  public func readNotifications(
+    forCharacteristic characteristic: Characteristic,
+    perform: (borrowing Span<UInt8>) async throws -> Void
+  ) async throws {
+    #if canImport(DarwinGATT)
+      let notifications = try await self.central.central.notify(
+        for: characteristic.underlying)
+    #else
+      let notifications = self.central.central.notify(
+        for: characteristic.underlying)
+    #endif
+    for try await notification in notifications {
+      try await perform(notification.span)
+    }
+  }
+
+  public func writeNotification(
+    forCharacteristic characteristic: Characteristic,
+    _ span: borrowing Span<UInt8>
+  ) async throws {
+    let data = span.withUnsafeBytes { buffer in
+      Data(buffer)
     }
 
-    public func writeNotification(
-      forCharacteristic characteristic: Characteristic,
-      _ span: borrowing Span<UInt8>
-    ) async throws {
-      let data = span.withUnsafeBytes { buffer in
-        Data(buffer)
-      }
+    try await self.central.central.writeValue(
+      data,
+      for: characteristic.underlying
+    )
+  }
 
-      try await self.central.central.writeValue(
-        data,
-        for: characteristic.underlying
-      )
+  internal func observeCharacteristic(
+    _ characteristic: Characteristic,
+    perform: (Data) async throws -> Void
+  ) async throws {
+    precondition(
+      characteristic.underlying.peripheral == peripheral,
+      "Cannot observe characteristics for different peripheral")
+
+    while !Task.isCancelled {
+      let value = try await central.central.readValue(for: characteristic.underlying)
+      try await perform(value)
+    }
+  }
+
+  public func observeCharacteristic<Value: Sendable>(
+    _ characteristic: BluetoothCharacteristic<Value>,
+    perform: (Value) async throws -> Void
+  ) async throws {
+    let services = try await central.central.discoverServices(
+      [characteristic.serviceId.uuid],
+      for: peripheral
+    )
+
+    guard services.count == 1 else {
+      return
     }
 
-    internal func observeCharacteristic(
-      _ characteristic: Characteristic,
-      perform: (Data) async throws -> Void
-    ) async throws {
-      precondition(
-        characteristic.underlying.peripheral == peripheral,
-        "Cannot observe characteristics for different peripheral")
+    let characteristics = try await central.central.discoverCharacteristics(
+      [],
+      for: services[0]
+    )
 
-      while !Task.isCancelled {
-        let value = try await central.central.readValue(for: characteristic.underlying)
-        try await perform(value)
-      }
+    guard characteristics.count == 1 else {
+      return
     }
 
-    public func observeCharacteristic<Value: Sendable>(
-      _ characteristic: BluetoothCharacteristic<Value>,
-      perform: (Value) async throws -> Void
-    ) async throws {
-      let services = try await central.central.discoverServices(
-        [characteristic.serviceId.uuid],
-        for: peripheral
-      )
-
-      guard services.count == 1 else {
-        return
-      }
-
-      let characteristics = try await central.central.discoverCharacteristics(
-        [],
-        for: services[0]
-      )
-
-      guard characteristics.count == 1 else {
-        return
-      }
-
-      try await observeCharacteristic(
-        Characteristic(underlying: characteristics[0])
-      ) { value in
-        let value = try characteristic.parse(value.span)
-        try await perform(value)
-      }
+    try await observeCharacteristic(
+      Characteristic(underlying: characteristics[0])
+    ) { value in
+      let value = try characteristic.parse(value.span)
+      try await perform(value)
     }
-  #endif
+  }
 }

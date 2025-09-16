@@ -96,7 +96,7 @@ struct HTTP1ClientTests {
 func withTAPS(
   _ perform: @Sendable @escaping (TAPS) async throws -> Void
 ) async throws {
-  let taps = TAPS()
+  let taps = try await TAPS()
 
   do {
     try await withThrowingDiscardingTaskGroup { group in

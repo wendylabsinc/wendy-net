@@ -9,7 +9,7 @@ public actor TAPS {
   private let tapsContext: TAPSContext
 
   /// Initialize TAPS instance
-  public init() async throws {
+  public nonisolated init() async throws {
     self.tapsContext = try await TAPSContext(
       bluetoothPeripheral: BluetoothPeripheral(),
       bluetoothCentral: BluetoothCentral()

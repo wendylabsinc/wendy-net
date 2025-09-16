@@ -47,13 +47,11 @@ public struct BluetoothAdvertisement: @unchecked Sendable {
       }
     #endif
 
-    #if swift(>=6.2)
-      public func withServiceData<T, E: Error>(
-        _ perform: (borrowing Span<UInt8>) throws(E) -> T
-      ) throws(E) -> T {
-        try perform(data.span)
-      }
-    #endif
+    public func withServiceData<T, E: Error>(
+      _ perform: (borrowing Span<UInt8>) throws(E) -> T
+    ) throws(E) -> T {
+      try perform(data.span)
+    }
 
     internal init(id: Bluetooth.BluetoothUUID, data: Data) {
       self.id = BluetoothUUID(uuid: id)
