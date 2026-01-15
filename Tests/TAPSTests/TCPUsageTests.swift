@@ -32,7 +32,7 @@ struct TCPUsageTests {
           defer { group.cancelAll() }
 
           try await taps.withConnection(
-            to: .tcp(host: "127.0.0.1", port: 54_123)
+            target: .tcp(host: "127.0.0.1", port: 54_123)
           ) { client in
             try await client.send(NetworkOutputBytes(string: message))
 
@@ -51,7 +51,7 @@ struct HTTP1ClientTests {
   @Test func testHTTP1Client() async throws {
     try await withTAPS { taps in
       try await taps.withConnection(
-        to: .http1(host: "example.com")
+        target: .http1(host: "example.com")
       ) { client in
         try await client.withResponse(
           to: HTTPRequest(
@@ -73,7 +73,7 @@ struct HTTP1ClientTests {
   @Test func testHTTPS1Client() async throws {
     try await withTAPS { taps in
       try await taps.withConnection(
-        to: .https1(host: "swiftonserver.com")
+        target: .https1(host: "swiftonserver.com")
       ) { client in
         try await client.withResponse(
           to: HTTPRequest(

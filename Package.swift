@@ -74,6 +74,9 @@ let package = Package(
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "Logging", package: "swift-log"),
         .product(name: "Metrics", package: "swift-metrics"),
+      ],
+      swiftSettings: [
+        .enableExperimentalFeature("InternalImportsByDefault")
       ]
     ),
     .testTarget(

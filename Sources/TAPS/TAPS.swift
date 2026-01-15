@@ -36,11 +36,11 @@ public actor TAPS {
 
   /// Generic withConnection method with default parameters
   public func withConnection<Service: ClientServiceProtocol, T: Sendable>(
-    to service: Service,
+    target service: Service,
     _ operation: @Sendable @escaping (Service.Client) async throws -> T
   ) async throws -> T where Service.Parameters: ParametersWithDefault {
     return try await withConnection(
-      to: service,
+      target: service,
       parameters: Service.Parameters.defaultParameters,
       operation
     )
@@ -48,7 +48,7 @@ public actor TAPS {
 
   /// Generic withConnection method with explicit parameters
   public func withConnection<Service: ClientServiceProtocol, T: Sendable>(
-    to service: Service,
+    target service: Service,
     parameters: Service.Parameters,
     _ operation: @Sendable @escaping (Service.Client) async throws -> T
   ) async throws -> T {
