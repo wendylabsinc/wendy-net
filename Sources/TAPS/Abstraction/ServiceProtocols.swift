@@ -34,3 +34,16 @@ public protocol ServerServiceProtocol: Sendable {
     perform: @escaping @Sendable (Server) async throws -> T
   ) async throws -> T
 }
+
+/// Base protocol for datagram (UDP) services
+public protocol DatagramServiceProtocol: Sendable {
+  associatedtype Parameters: Sendable
+  associatedtype Socket: DatagramSocketProtocol
+
+  /// Create socket with given parameters
+  func withSocket<T: Sendable>(
+    parameters: Parameters,
+    context: TAPSContext,
+    perform: @escaping @Sendable (Socket) async throws -> T
+  ) async throws -> T
+}

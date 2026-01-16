@@ -107,4 +107,39 @@ public actor TAPS {
       }
     }
   }
+
+  // MARK: - UDP Socket Support
+
+  /// Create a UDP socket with default parameters
+  public func withUDPSocket<Service: DatagramServiceProtocol, T: Sendable>(
+    on service: Service,
+    _ operation: @Sendable @escaping (Service.Socket) async throws -> T
+  ) async throws -> T where Service.Parameters: ParametersWithDefault {
+    return try await withUDPSocket(
+      on: service,
+      parameters: Service.Parameters.defaultParameters,
+      operation
+    )
+  }
+
+  /// Create a UDP socket with explicit parameters
+  public func withUDPSocket<Service: DatagramServiceProtocol, T: Sendable>(
+    on service: Service,
+    parameters: Service.Parameters,
+    _ operation: @Sendable @escaping (Service.Socket) async throws -> T
+  ) async throws -> T {
+    return try await service.withSocket(
+      parameters: parameters,
+      context: self.tapsContext
+    ) { socket in
+      try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+        taskGroup.addTask {
+          try await socket.run()
+        }
+
+        defer { taskGroup.cancelAll() }
+        return try await operation(socket)
+      }
+    }
+  }
 }
