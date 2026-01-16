@@ -27,6 +27,17 @@ public protocol DuplexServerProtocol<Client>: Sendable {
   ) async throws(ConnectionError)
 }
 
+/// Protocol for datagram (UDP) sockets
+public protocol DatagramSocketProtocol: ServiceLifecycle.Service, Sendable {
+  associatedtype InboundDatagram: Sendable
+  associatedtype OutboundDatagram: Sendable
+  associatedtype SocketError: Swift.Error
+  associatedtype InboundDatagrams: AsyncSequence<InboundDatagram, SocketError> & Sendable
+
+  var inbound: InboundDatagrams { get }
+  func send(_ datagram: OutboundDatagram) async throws
+}
+
 public struct ConnectionSubprotocol<
   InboundIn: Sendable,
   InboundOut: Sendable,
