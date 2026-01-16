@@ -2,16 +2,16 @@ public struct BluetoothCharacteristic<Value: Sendable>: Sendable {
   public let serviceId: BluetoothService.ID
   public let id: BluetoothUUID
 
-  public typealias WithValue = (borrowing RawSpan) -> Void
+  public typealias WithBytes = ([UInt8]) -> Void
 
   internal let parse: @Sendable (borrowing Span<UInt8>) throws -> Value
-  internal let write: @Sendable (Value) -> (WithValue) -> Void
+  internal let write: @Sendable (Value) -> (WithBytes) -> Void
 
   public init(
     id: BluetoothUUID,
     serviceId: BluetoothUUID,
     parse: @Sendable @escaping (Span<UInt8>) throws -> Value,
-    write: @Sendable @escaping (Value) -> (WithValue) -> Void
+    write: @Sendable @escaping (Value) -> (WithBytes) -> Void
   ) {
     self.serviceId = serviceId
     self.id = id
@@ -41,13 +41,13 @@ public enum Characteristics {
 }
 
 public enum BluetoothServices {
-  public static let battery = BluetoothUUID(uuid: .bit16(0x180f))
-  public static let genericAccess = BluetoothUUID(uuid: .bit16(0x1800))
+  public static let battery = BluetoothUUID(bit16: 0x180f)
+  public static let genericAccess = BluetoothUUID(bit16: 0x1800)
 }
 
 extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
   public static let batteryLevel = BluetoothCharacteristic(
-    id: BluetoothUUID(uuid: .bit16(0x2a19)),
+    id: BluetoothUUID(bit16: 0x2a19),
     serviceId: BluetoothServices.battery
   ) { span in
     guard
@@ -60,15 +60,14 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
     return Characteristics.BatteryLevel(level: span[0])
   } write: { value in
     return { write in
-      let array = InlineArray<1, UInt8>(repeating: value.level)
-      write(array.span.bytes)
+      write([value.level])
     }
   }
 }
 
 extension BluetoothCharacteristic<Characteristics.LocalName> {
   public static let localName = BluetoothCharacteristic(
-    id: BluetoothUUID(uuid: .bit16(0x2a00)),
+    id: BluetoothUUID(bit16: 0x2a00),
     serviceId: BluetoothServices.genericAccess
   ) { span in
     let span = try UTF8Span(validating: span)
@@ -76,7 +75,7 @@ extension BluetoothCharacteristic<Characteristics.LocalName> {
     return Characteristics.LocalName(name: name)
   } write: { value in
     return { write in
-      write(value.name.utf8Span.span.bytes)
+      write(Array(value.name.utf8))
     }
   }
 }

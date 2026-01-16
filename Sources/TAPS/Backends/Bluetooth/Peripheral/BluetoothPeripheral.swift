@@ -1,43 +1,99 @@
 import AsyncAlgorithms
 internal import Bluetooth
-internal import GATT
 import Logging
 import ServiceLifecycle
 
-#if canImport(DarwinGATT)
-  internal import DarwinGATT
-  internal typealias _Peripheral = DarwinPeripheral
-#elseif canImport(BluetoothLinux)
-  internal import BluetoothLinux
-  internal typealias _Peripheral = GATTPeripheral<
-    BluetoothLinux.HostController, BluetoothLinux.L2CAPSocket.Server
-  >
+#if canImport(FoundationEssentials)
+  internal import FoundationEssentials
+#else
+  internal import Foundation
 #endif
 
-#if canImport(FoundationEssentials)
-  import FoundationEssentials
-#else
-  import Foundation
-#endif
+/// ATT attribute permission bitfield values
+@frozen
+public struct ATTAttributePermissions: OptionSet, Equatable, Hashable, Sendable {
+  public let rawValue: UInt8
+
+  public init(rawValue: UInt8) {
+    self.rawValue = rawValue
+  }
+
+  // Access
+  public static var read: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x01) }
+  public static var write: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x02) }
+
+  // Encryption
+  public static var encrypt: ATTAttributePermissions { [.readEncrypt, .writeEncrypt] }
+  public static var readEncrypt: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x04) }
+  public static var writeEncrypt: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x08) }
+
+  // Authentication
+  public static var authentication: ATTAttributePermissions { [.readAuthentication, .writeAuthentication] }
+  public static var readAuthentication: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x10) }
+  public static var writeAuthentication: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x20) }
+
+  // Authorization
+  public static var authorized: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x40) }
+  public static var noAuthorization: ATTAttributePermissions { ATTAttributePermissions(rawValue: 0x80) }
+
+  internal var toGATT: GATTAttributePermissions {
+    var result = GATTAttributePermissions()
+    if contains(.read) { result.insert(.readable) }
+    if contains(.write) { result.insert(.writeable) }
+    if contains(.readEncrypt) { result.insert(.readEncryptionRequired) }
+    if contains(.writeEncrypt) { result.insert(.writeEncryptionRequired) }
+    return result
+  }
+}
+
+/// GATT Characteristic Properties Bitfield values
+public struct GATTCharacteristicProperty: OptionSet, Hashable, Sendable {
+  public var rawValue: UInt8
+
+  public init(rawValue: UInt8) {
+    self.rawValue = rawValue
+  }
+
+  public static var broadcast: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x01) }
+  public static var read: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x02) }
+  public static var writeWithoutResponse: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x04) }
+  public static var write: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x08) }
+  public static var notify: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x10) }
+  public static var indicate: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x20) }
+  public static var signedWrite: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x40) }
+  public static var extendedProperties: GATTCharacteristicProperty { GATTCharacteristicProperty(rawValue: 0x80) }
+
+  internal var toGATT: GATTCharacteristicProperties {
+    var result = GATTCharacteristicProperties()
+    if contains(.broadcast) { result.insert(.broadcast) }
+    if contains(.read) { result.insert(.read) }
+    if contains(.writeWithoutResponse) { result.insert(.writeWithoutResponse) }
+    if contains(.write) { result.insert(.write) }
+    if contains(.notify) { result.insert(.notify) }
+    if contains(.indicate) { result.insert(.indicate) }
+    if contains(.signedWrite) { result.insert(.authenticatedSignedWrites) }
+    if contains(.extendedProperties) { result.insert(.extendedProperties) }
+    return result
+  }
+}
 
 public struct BluetoothCharacteristicsWriter: ~Copyable {
-  internal typealias Underlying = GATTAttribute<Data>.Characteristic
   public typealias ProduceEvents<Value: Sendable> = @Sendable (Value) async throws -> Void
 
   internal let peripheral: BluetoothPeripheral
   internal var taskGroup: ThrowingDiscardingTaskGroup<any Error>
   let registerCharacteristics:
     @Sendable (BluetoothUUID, borrowing BluetoothCharacteristicsWriter) async throws -> (
-      UInt16, [UInt16]
+      GATTServiceRegistration, [GATTCharacteristic]
     )
-  internal var characteristics = [Underlying]()
+  internal var characteristics = [GATTCharacteristicDefinition]()
 
   public struct RegisteringCharacteristic<Value: Sendable>: Sendable {
     public var characteristic: BluetoothCharacteristic<Value>
     public var initialValue: Value
     public var withValues: @Sendable (ProduceEvents<Value>) async throws -> Void
     public var permissions: ATTAttributePermissions
-    public var properties: GATTCharacteristicProperties
+    public var properties: GATTCharacteristicProperty
   }
 
   public mutating func add<each Value: Sendable>(
@@ -50,43 +106,38 @@ public struct BluetoothCharacteristicsWriter: ~Copyable {
         "ServiceID did not match that specified in the characteristic")
 
       let write = registration.characteristic.write(registration.initialValue)
-      write { span in
-        let underlying = Underlying(
+      write { bytes in
+        let underlying = GATTCharacteristicDefinition(
           uuid: registration.characteristic.id.uuid,
-          value: span.withUnsafeBytes { buffer in
-            Data(buffer)
-          },
-          permissions: .init(rawValue: registration.permissions.rawValue),
-          properties: .init(rawValue: registration.properties.rawValue),
-          descriptors: []  // TODO: Support
+          properties: registration.properties.toGATT,
+          permissions: registration.permissions.toGATT,
+          initialValue: Data(bytes)
         )
         self.characteristics.append(underlying)
       }
 
-      let (_, characteristicsHandles) = try await registerCharacteristics(
+      let (_, registeredCharacteristics) = try await registerCharacteristics(
         registration.characteristic.serviceId, self)
 
       taskGroup.addTask { [peripheral] in
-        guard characteristicsHandles.count == 1 else {
+        guard registeredCharacteristics.count == 1 else {
           preconditionFailure(
-            "characteristicsHandles.count should have been 1, as 1 characteristic was registered")
+            "registeredCharacteristics.count should have been 1, as 1 characteristic was registered")
         }
 
-        let handle = characteristicsHandles[0]
+        let registeredCharacteristic = registeredCharacteristics[0]
 
         try await registration.withValues { event in
           var data = Data()
           let write = registration.characteristic.write(event)
 
-          write { span in
-            data = span.withUnsafeBytes { buffer in
-              Data(buffer)
-            }
+          write { bytes in
+            data = Data(bytes)
           }
 
-          try await peripheral.writeValue(
+          try await peripheral.updateValue(
             data,
-            to: handle
+            for: registeredCharacteristic
           )
         }
       }
@@ -98,7 +149,7 @@ public struct BluetoothCharacteristicsWriter: ~Copyable {
     initialValue: Value,
     withValues: @Sendable @escaping (ProduceEvents<Value>) async throws -> Void,
     permissions: ATTAttributePermissions,
-    properties: GATTCharacteristicProperties
+    properties: GATTCharacteristicProperty
   ) async throws {
     try await add(
       serviceId: characteristic.serviceId,
@@ -136,7 +187,7 @@ public actor BluetoothPeripheral {
     let taskGroup: ThrowingDiscardingTaskGroup<any Error>
     let registerCharacteristics:
       @Sendable (BluetoothUUID, borrowing BluetoothCharacteristicsWriter) async throws -> (
-        UInt16, [UInt16]
+        GATTServiceRegistration, [GATTCharacteristic]
       )
 
     mutating func register(_ service: some BluetoothServiceProtocol) async throws {
@@ -151,11 +202,7 @@ public actor BluetoothPeripheral {
     }
   }
 
-  #if canImport(DarwinGATT)
-    private static let peripheral = _Peripheral()
-  #endif
-
-  private let peripheral: _Peripheral
+  private let manager: PeripheralManager
   private nonisolated let inboundWrapper = InboundWrapper()
 
   private final class InboundWrapper: @unchecked Sendable {
@@ -165,36 +212,17 @@ public actor BluetoothPeripheral {
   }
 
   internal init() async throws {
-    #if canImport(DarwinGATT)
-      self.peripheral = Self.peripheral
+    self.manager = PeripheralManager()
 
-      while true {
-        switch peripheral.state {
-        case .unknown, .resetting, .unsupported, .unauthorized, .poweredOff:
-          // Wait to become active
-          try await Task.sleep(for: .seconds(1))
-        case .poweredOn:
-          return
-        }
+    // Wait for Bluetooth to be powered on
+    while true {
+      let state = await manager.state()
+      switch state {
+      case .poweredOn:
+        return
+      case .unknown, .resetting, .unsupported, .unauthorized, .poweredOff:
+        try await Task.sleep(for: .seconds(1))
       }
-    #else
-      guard let hostController = await HostController.default else {
-        throw BluetoothNotAvailableError()
-      }
-
-      self.peripheral = _Peripheral(
-        hostController: hostController,
-        options: GATTPeripheralOptions(
-          maximumTransmissionUnit: .max,
-          maximumPreparedWrites: 1000
-        ),
-        socket: BluetoothLinux.L2CAPSocket.Server.self
-      )
-    #endif
-
-    let logger = Logger(label: "engineer.edge.taps.bluetooth.peripheral")
-    self.peripheral.log = { string in
-      logger.error("\(string)")
     }
   }
 
@@ -202,38 +230,32 @@ public actor BluetoothPeripheral {
     characteristicId: BluetoothUUID,
     into inbound: AsyncChannel<Data>
   ) {
-    self.peripheral.willRead = { read in
-      Task {
-        await inbound.send(read.value)
-      }
-      return nil
-    }
+    // GATT read handling is done through gattRequests() stream
+    self.inboundWrapper.inbound = inbound
   }
 
-  internal func writeValue(
+  internal func updateValue(
     _ value: Data,
-    to characteristicHandle: UInt16
+    for characteristic: GATTCharacteristic
   ) async throws {
-    self.peripheral.write(value, forCharacteristic: characteristicHandle)
+    try await manager.updateValue(value, for: characteristic, type: .notification)
   }
 
   internal func run(
     localName: String?
   ) async throws {
     try await withTaskCancellationHandler {
-      #if canImport(DarwinGATT)
-        try await peripheral.start(
-          options: _Peripheral.AdvertisingOptions(localName: localName)
-        )
-      #else
-        peripheral.start()
-      #endif
+      let advertisementData = AdvertisementData(localName: localName)
+      let parameters = AdvertisingParameters(isConnectable: true)
+      try await manager.startAdvertising(advertisementData, parameters: parameters)
 
       while true {
         try await Task.sleep(for: .seconds(100_000))
       }
     } onCancel: {
-      peripheral.stop()
+      Task {
+        await manager.stopAdvertising()
+      }
     }
   }
 
@@ -244,49 +266,73 @@ public actor BluetoothPeripheral {
     try await withTaskCancellationHandler {
       try await withThrowingDiscardingTaskGroup { taskGroup in
         let services = RegisteringServices()
+
         var registration = ServiceRegistration(
           peripheral: self,
           services: services,
           taskGroup: taskGroup
-        ) { id, writer in
-          #if canImport(DarwinGATT)
-            try await self.peripheral.add(
-              service: GATTAttribute<Data>.Service(
-                uuid: id.uuid,
-                isPrimary: true,
-                characteristics: writer.characteristics,
-                includedServices: []
-              )
-            )
-          #else
-            self.peripheral.add(
-              service: GATTAttribute<Data>.Service(
-                uuid: id.uuid,
-                isPrimary: true,
-                characteristics: writer.characteristics,
-                includedServices: []
-              )
-            )
-          #endif
+        ) { [manager] id, writer in
+          let serviceDefinition = GATTServiceDefinition(
+            uuid: id.uuid,
+            isPrimary: true,
+            characteristics: writer.characteristics
+          )
+
+          let service = try await manager.addService(serviceDefinition)
+
+          // Get the characteristics from the registered service
+          let characteristics = service.characteristics
+
+          return (service, characteristics)
         }
         try await registerServices(&registration)
 
-        #if canImport(DarwinGATT)
-          try await peripheral.start(
-            options: _Peripheral.AdvertisingOptions(
-              localName: localName,
-              serviceUUIDs: services.ids
-            )
-          )
-        #else
-          peripheral.start()
-        #endif
+        let advertisementData = AdvertisementData(
+          localName: localName,
+          serviceUUIDs: await services.ids
+        )
+        let parameters = AdvertisingParameters(isConnectable: true)
+        try await manager.startAdvertising(advertisementData, parameters: parameters)
+
+        // Handle GATT requests
+        taskGroup.addTask { [manager, inboundWrapper] in
+          do {
+            for try await request in try await manager.gattRequests() {
+              switch request {
+              case .read(let readRequest):
+                // Return the current value or empty data
+                await readRequest.respond(.success(Data()))
+              case .write(let writeRequest):
+                // Forward to inbound channel if set
+                if let inbound = inboundWrapper.inbound {
+                  await inbound.send(writeRequest.value)
+                }
+                if writeRequest.writeType == .withResponse {
+                  await writeRequest.respond(.success(()))
+                }
+              case .readDescriptor(let descriptorRequest):
+                await descriptorRequest.respond(.success(Data()))
+              case .writeDescriptor(let descriptorRequest):
+                await descriptorRequest.respond(.success(()))
+              case .executeWrite(let executeRequest):
+                await executeRequest.respond(.success(()))
+              case .authorize, .subscribe, .unsubscribe:
+                // Handle authorization and subscription changes
+                break
+              }
+            }
+          } catch {
+            // Ignore GATT request stream errors
+          }
+        }
 
         try await gracefulShutdown()
-        peripheral.stop()
+        await manager.stopAdvertising()
       }
     } onCancel: {
-      peripheral.stop()
+      Task {
+        await manager.stopAdvertising()
+      }
     }
   }
 }

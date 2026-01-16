@@ -49,12 +49,10 @@ public struct NetworkInputBytes: Sendable {
 
 extension String {
   public init(bytes: NetworkInputBytes) {
-    self = bytes.buffer.withUnsafeReadableBytes { pointer in
-      String(
-        decoding: pointer,
-        as: Unicode.UTF8.self
-      )
-    }
+    self = bytes.buffer.getString(
+      at: bytes.buffer.readerIndex,
+      length: bytes.buffer.readableBytes
+    ) ?? ""
   }
 }
 

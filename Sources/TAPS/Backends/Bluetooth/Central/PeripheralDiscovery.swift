@@ -1,17 +1,10 @@
 import AsyncAlgorithms
 internal import Bluetooth
-internal import GATT
-
-#if canImport(DarwinGATT)
-  internal import DarwinGATT
-#elseif canImport(BluetoothLinux)
-  internal import BluetoothLinux
-#endif
 
 #if canImport(FoundationEssentials)
-  import FoundationEssentials
+  internal import FoundationEssentials
 #else
-  import Foundation
+  internal import Foundation
 #endif
 
 extension BluetoothCentral {
@@ -45,38 +38,42 @@ extension BluetoothCentral {
 
         func upsert(_ peer: Peer) {
           self.peers.removeAll {
-            $0.data.peripheral == peer.data.peripheral
+            $0.scanResult.peripheral == peer.scanResult.peripheral
           }
           self.peers.append(peer)
         }
       }
 
-      let stream = try await central.central.scan(filterDuplicates: true)
+      let stream = try await central.centralManager.scan()
       let output = Output()
 
       try await withTaskCancellationHandler {
-        for try await scanData in stream {
-          var name: String? = nil
-          #if canImport(DarwinGATT)
-            name = try? await central.central.name(for: scanData.peripheral)
-          #endif
-          let peer = Peer(data: scanData, name: name)
+        for try await scanResult in stream {
+          let name = scanResult.advertisementData.localName
+          let peer = Peer(scanResult: scanResult, name: name, _discoveredAt: scanResult.timestamp)
 
           switch reference.underlying {
-          case .any, .named(name):
+          case .any:
             await output.upsert(peer)
-          case .named:
-            ()
+          case .named(let expectedName):
+            if name == expectedName {
+              await output.upsert(peer)
+            }
           }
 
           try await handleResults(output.peers)
 
-          if pollingInterval == nil {
-            stream.stop()
+          if let interval = pollingInterval {
+            try await Task.sleep(for: interval)
+          } else {
+            try await central.centralManager.stopScan()
+            break
           }
         }
       } onCancel: {
-        stream.stop()
+        Task {
+          try? await central.centralManager.stopScan()
+        }
       }
     }
   }

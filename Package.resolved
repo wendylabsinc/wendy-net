@@ -1,39 +1,22 @@
 {
-  "originHash" : "41c32debe3d2361813507f9c9e4f5e5aea14c1dcd65b83ded4b09adbc6a77d79",
+  "originHash" : "bea5a7d38fb81f15446674121a464135877ddfd3f2bdf8e9e35c73047ba42d56",
   "pins" : [
     {
       "identity" : "bluetooth",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/PureSwift/Bluetooth.git",
+      "location" : "https://github.com/wendylabsinc/bluetooth.git",
       "state" : {
-        "branch" : "master",
-        "revision" : "52f228b819e8ef920e4232cc37c9a84ffbbc5707"
+        "revision" : "570956c252d32c00e45d02e04b09560ab1ea5a15",
+        "version" : "0.1.0"
       }
     },
     {
-      "identity" : "bluetoothlinux",
+      "identity" : "dbus",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/PureSwift/BluetoothLinux.git",
+      "location" : "https://github.com/wendylabsinc/dbus.git",
       "state" : {
-        "revision" : "077f9d36afdae57e12c436842db56ef318e2fd23"
-      }
-    },
-    {
-      "identity" : "gatt",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/PureSwift/GATT.git",
-      "state" : {
-        "revision" : "8f9b5f21faf8995d5f72c64712d54afc81f895c1",
-        "version" : "3.3.1"
-      }
-    },
-    {
-      "identity" : "socket",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/PureSwift/Socket.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "85fdcac657041100365190a02c70a72146fadaf0"
+        "revision" : "4d88300754c806827d919c5274cbfc18baebe9ab",
+        "version" : "0.3.0"
       }
     },
     {
@@ -205,15 +188,6 @@
       "state" : {
         "revision" : "e7187309187695115033536e8fc9b2eb87fd956d",
         "version" : "2.8.0"
-      }
-    },
-    {
-      "identity" : "swift-syntax",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-syntax.git",
-      "state" : {
-        "revision" : "f99ae8aa18f0cf0d53481901f88a0991dc3bd4a2",
-        "version" : "601.0.1"
       }
     },
     {

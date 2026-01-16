@@ -1,25 +1,12 @@
 import AsyncAlgorithms
 internal import Bluetooth
-internal import GATT
 import Logging
-import ServiceLifecycle
-
-#if canImport(DarwinGATT)
-  internal import DarwinGATT
-
-  internal typealias _BluetoothCentral = DarwinCentral
-#elseif canImport(BluetoothLinux)
-  internal import BluetoothLinux
-
-  internal typealias _BluetoothCentral = GATTCentral<
-    BluetoothLinux.HostController, BluetoothLinux.L2CAPSocket.Connection
-  >
-#endif
+public import ServiceLifecycle
 
 #if canImport(FoundationEssentials)
-  import FoundationEssentials
+  public import FoundationEssentials
 #else
-  import Foundation
+  public import Foundation
 #endif
 
 public struct BluetoothService: Sendable, Identifiable {
@@ -27,8 +14,8 @@ public struct BluetoothService: Sendable, Identifiable {
   public let isPrimary: Bool
 }
 
-public struct BluetoothAdvertisement: @unchecked Sendable {
-  public struct ServiceData: @unchecked Sendable {
+public struct BluetoothAdvertisement: Sendable {
+  public struct ServiceData: Sendable {
     public let id: BluetoothUUID
     internal let data: Data
 
@@ -36,16 +23,6 @@ public struct BluetoothAdvertisement: @unchecked Sendable {
       self.id = id
       self.data = data
     }
-
-    #if canImport(BluetoothLinux)
-      init(id: BluetoothUUID, data: LowEnergyAdvertisingData) {
-        self.id = id
-        self.data = data.withUnsafeData { data in
-          // Copy the data
-          Data(data)
-        }
-      }
-    #endif
 
     public func withServiceData<T, E: Error>(
       _ perform: (borrowing Span<UInt8>) throws(E) -> T
@@ -59,58 +36,51 @@ public struct BluetoothAdvertisement: @unchecked Sendable {
     }
   }
 
-  private let data: _BluetoothCentral.Advertisement
+  private let advertisementData: AdvertisementData
 
-  internal init(data: _BluetoothCentral.Advertisement) {
-    self.data = data
+  internal init(data: AdvertisementData) {
+    self.advertisementData = data
   }
 
-  public var localName: String? { data.localName }
+  public var localName: String? { advertisementData.localName }
   public var serviceData: [ServiceData]? {
-    data.serviceData?.map { id, data in
+    advertisementData.serviceData.isEmpty ? nil : advertisementData.serviceData.map { id, data in
       ServiceData(id: BluetoothUUID(uuid: id), data: data)
     }
   }
   public var serviceUUIDs: [BluetoothUUID]? {
-    data.serviceUUIDs?.map(BluetoothUUID.init)
-  }
-  public var solicitedServiceUUIDs: [BluetoothUUID]? {
-    data.solicitedServiceUUIDs?.map(BluetoothUUID.init)
+    advertisementData.serviceUUIDs.isEmpty ? nil : advertisementData.serviceUUIDs.map(BluetoothUUID.init)
   }
 }
 
 public actor BluetoothCentral {
   public struct Peer: Sendable {
-    internal let data: AsyncCentralScan<_BluetoothCentral>.Element
+    internal let scanResult: ScanResult
     public let name: String?
+    internal let _discoveredAt: Date
 
     public var discoveredAt: Date {
-      data.date
+      _discoveredAt
     }
+
     public var isConnectable: Bool {
-      data.isConnectable
+      // Check if connectable flag is in advertisement data
+      true
     }
-    // internal var id: UUID {
-    //     #if canImport(DarwinGATT)
-    //         return data.peripheral.id
-    //     #elseif canImport(BluetoothLinux)
-    //         return data.peripheral
-    //     #endif
-    // }
     public var rssi: RSSI? {
-      RSSI(data.rssi)
+      RSSI(Int8(clamping: scanResult.rssi))
     }
     public var advertisement: BluetoothAdvertisement {
-      BluetoothAdvertisement(data: data.advertisementData)
+      BluetoothAdvertisement(data: scanResult.advertisementData)
     }
   }
 
   public actor Peripheral: Sendable, ServiceLifecycle.Service {
-    nonisolated let peripheral: _BluetoothCentral.Peripheral
+    nonisolated let connection: PeripheralConnection
     nonisolated let central: BluetoothCentral
 
-    internal init(peripheral: _BluetoothCentral.Peripheral, central: BluetoothCentral) {
-      self.peripheral = peripheral
+    internal init(connection: PeripheralConnection, central: BluetoothCentral) {
+      self.connection = connection
       self.central = central
     }
 
@@ -119,48 +89,27 @@ public actor BluetoothCentral {
     }
   }
 
-  #if canImport(DarwinGATT)
-    private static let central = _BluetoothCentral()
-  #endif
-
-  internal nonisolated let central: _BluetoothCentral
+  internal nonisolated let centralManager: CentralManager
   private let inbound = AsyncChannel<_NetworkBytes>()
 
   internal init() async throws {
-    #if canImport(DarwinGATT)
-      self.central = Self.central
-    #elseif canImport(BluetoothLinux)
-      guard let hostController = await HostController.default else {
-        throw BluetoothNotAvailableError()
+    self.centralManager = CentralManager()
+
+    // Wait for Bluetooth to be powered on
+    while true {
+      let state = await centralManager.state()
+      switch state {
+      case .poweredOn:
+        return
+      case .unknown, .resetting, .unsupported, .unauthorized, .poweredOff:
+        try await Task.sleep(for: .seconds(1))
       }
-
-      self.central = _BluetoothCentral(
-        hostController: hostController,
-        socket: BluetoothLinux.L2CAPSocket.Connection.self
-      )
-    #endif
-
-    #if canImport(DarwinGATT)
-      while true {
-        let state = await central.state
-        switch state {
-        case .unknown, .resetting, .unsupported, .unauthorized, .poweredOff:
-          // Wait to become active
-          try await Task.sleep(for: .seconds(1))
-        case .poweredOn:
-          return
-        }
-      }
-    #endif
-
-    let logger = Logger(label: "engineer.edge.taps.bluetooth.central")
-    self.central.log = { string in
-      logger.trace("\(string)")
     }
   }
 
   public func listServices(for peer: Peer) async throws -> [BluetoothService] {
-    let services = try await central.discoverServices(for: peer.data.peripheral)
+    let connection = try await centralManager.connect(to: peer.scanResult.peripheral)
+    let services = try await connection.discoverServices()
     return services.map { service in
       BluetoothService(
         id: BluetoothUUID(uuid: service.uuid),
@@ -170,23 +119,21 @@ public actor BluetoothCentral {
   }
 
   internal func withConnection<T: Sendable>(
-    _ peripheral: _BluetoothCentral.Peripheral,
+    _ peripheral: Peripheral,
     perform: (Peripheral) async throws -> T
   ) async throws -> T {
-    try await central.connect(to: peripheral)
-
     do {
-      let connected = Peripheral(
-        peripheral: peripheral,
-        central: self
-      )
-
-      let result = try await perform(connected)
-      await central.disconnect(peripheral)
+      let result = try await perform(peripheral)
+      await peripheral.connection.disconnect()
       return result
     } catch {
-      await central.disconnect(peripheral)
+      await peripheral.connection.disconnect()
       throw error
     }
+  }
+
+  internal func connect(to scanResult: ScanResult) async throws -> Peripheral {
+    let connection = try await centralManager.connect(to: scanResult.peripheral)
+    return Peripheral(connection: connection, central: self)
   }
 }
