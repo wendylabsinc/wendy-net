@@ -1,20 +1,5 @@
-#if canImport(DarwinGATT)
-  #if canImport(DarwinGATT)
-    internal import Bluetooth
-    internal import GATT
-    internal import DarwinGATT
-  #elseif canImport(BluetoothLinux)
-    internal import Bluetooth
-    internal import BluetoothLinux
-  #endif
+internal import Bluetooth
 
-  #if canImport(FoundationEssentials)
-    import FoundationEssentials
-  #else
-    import Foundation
-  #endif
-
-  extension BluetoothPeripheral {
-
-  }
-#endif
+extension BluetoothPeripheral {
+  // Placeholder for additional peripheral server functionality
+}

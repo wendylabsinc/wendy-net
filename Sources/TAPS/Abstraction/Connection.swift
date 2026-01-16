@@ -2,7 +2,7 @@
 // Actor-based connection protocols
 
 import AsyncAlgorithms
-import ServiceLifecycle
+public import ServiceLifecycle
 
 #if canImport(NIOCore)
   internal import NIOCore

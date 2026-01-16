@@ -1,4 +1,5 @@
-import Observation
+internal import Bluetooth
+public import Observation
 
 public struct MetricsBluetoothService<Entity: Observable & Sendable>: BluetoothServiceProtocol {
   public let id: BluetoothUUID

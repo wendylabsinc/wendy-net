@@ -2,7 +2,7 @@
 // RFC-compliant service protocols
 
 import AsyncAlgorithms
-import ServiceLifecycle
+public import ServiceLifecycle
 
 /// Base protocol for client services
 public protocol ClientServiceProtocol: Sendable {
