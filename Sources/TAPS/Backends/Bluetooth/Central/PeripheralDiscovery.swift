@@ -63,7 +63,9 @@ extension BluetoothCentral {
 
           try await handleResults(output.peers)
 
-          if pollingInterval == nil {
+          if let interval = pollingInterval {
+            try await Task.sleep(for: interval)
+          } else {
             try await central.centralManager.stopScan()
             break
           }

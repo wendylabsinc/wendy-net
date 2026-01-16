@@ -106,6 +106,7 @@ extension BluetoothCentral.Peripheral {
     while !Task.isCancelled {
       let value = try await connection.readValue(for: characteristic.underlying)
       try await perform(value)
+      try await Task.sleep(for: .milliseconds(100))
     }
   }
 

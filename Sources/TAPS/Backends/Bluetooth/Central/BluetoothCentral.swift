@@ -4,9 +4,9 @@ import Logging
 public import ServiceLifecycle
 
 #if canImport(FoundationEssentials)
-  internal import FoundationEssentials
+  public import FoundationEssentials
 #else
-  internal import Foundation
+  public import Foundation
 #endif
 
 public struct BluetoothService: Sendable, Identifiable {
@@ -59,9 +59,8 @@ public actor BluetoothCentral {
     public let name: String?
     internal let _discoveredAt: Date
 
-    public var discoveredAt: ContinuousClock.Instant {
-      // Convert Date to ContinuousClock.Instant (approximate)
-      ContinuousClock.now
+    public var discoveredAt: Date {
+      _discoveredAt
     }
 
     public var isConnectable: Bool {

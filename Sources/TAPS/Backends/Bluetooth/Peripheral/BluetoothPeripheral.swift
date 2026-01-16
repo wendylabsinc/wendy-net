@@ -122,7 +122,7 @@ public struct BluetoothCharacteristicsWriter: ~Copyable {
       taskGroup.addTask { [peripheral] in
         guard registeredCharacteristics.count == 1 else {
           preconditionFailure(
-            "characteristicsHandles.count should have been 1, as 1 characteristic was registered")
+            "registeredCharacteristics.count should have been 1, as 1 characteristic was registered")
         }
 
         let registeredCharacteristic = registeredCharacteristics[0]
