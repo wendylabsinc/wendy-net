@@ -23,7 +23,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.86.0"),
     .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.29.0"),
     .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
-    .package(url: "https://github.com/wendylabsinc/bluetooth.git", branch: "main"),
+    .package(url: "https://github.com/wendylabsinc/bluetooth.git", from: "0.1.0"),
     // Public dependencies
     .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.8.0"),
     .package(url: "https://github.com/apple/swift-http-types.git", from: "1.4.0"),
