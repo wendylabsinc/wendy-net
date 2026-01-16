@@ -140,8 +140,7 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
     return Characteristics.BatteryLevel(level: span[0])
   } write: { value in
     return { write in
-      let array = InlineArray<1, UInt8>(repeating: value.level)
-      write(array.span.bytes)
+      write([value.level])
     }
   }
 }
@@ -155,11 +154,21 @@ extension BluetoothCharacteristic<UInt64> {
       throw CharacteristicParsingError()
     }
 
-    return span.bytes.unsafeLoad(as: UInt64.self)
+    // Safe little-endian UInt64 loading from bytes
+    var value: UInt64 = 0
+    for i in 0..<8 {
+      value |= UInt64(span[i]) << (i * 8)
+    }
+    return value
   } write: { value in
     return { write in
-      let array = InlineArray<1, UInt64>(repeating: value)
-      write(array.span.bytes)
+      // Safe little-endian UInt64 serialization to bytes
+      var bytes = [UInt8]()
+      bytes.reserveCapacity(8)
+      for i in 0..<8 {
+        bytes.append(UInt8(truncatingIfNeeded: value >> (i * 8)))
+      }
+      write(bytes)
     }
   }
 }

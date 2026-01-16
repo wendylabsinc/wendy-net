@@ -38,7 +38,11 @@ let package = Package(
       name: "TAPSBluetoothExample",
       dependencies: [
         "TAPS"
-      ]),
+      ],
+      swiftSettings: [
+        .strictMemorySafety()
+      ]
+    ),
     .target(
       name: "TAPS",
       dependencies: [
@@ -62,7 +66,8 @@ let package = Package(
         .product(name: "Metrics", package: "swift-metrics"),
       ],
       swiftSettings: [
-        .enableExperimentalFeature("InternalImportsByDefault")
+        .enableExperimentalFeature("InternalImportsByDefault"),
+        .strictMemorySafety()
       ]
     ),
     .testTarget(

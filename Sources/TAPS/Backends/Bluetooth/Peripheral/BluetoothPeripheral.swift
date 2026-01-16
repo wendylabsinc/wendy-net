@@ -106,14 +106,12 @@ public struct BluetoothCharacteristicsWriter: ~Copyable {
         "ServiceID did not match that specified in the characteristic")
 
       let write = registration.characteristic.write(registration.initialValue)
-      write { span in
+      write { bytes in
         let underlying = GATTCharacteristicDefinition(
           uuid: registration.characteristic.id.uuid,
           properties: registration.properties.toGATT,
           permissions: registration.permissions.toGATT,
-          initialValue: span.withUnsafeBytes { buffer in
-            Data(buffer)
-          }
+          initialValue: Data(bytes)
         )
         self.characteristics.append(underlying)
       }
@@ -133,10 +131,8 @@ public struct BluetoothCharacteristicsWriter: ~Copyable {
           var data = Data()
           let write = registration.characteristic.write(event)
 
-          write { span in
-            data = span.withUnsafeBytes { buffer in
-              Data(buffer)
-            }
+          write { bytes in
+            data = Data(bytes)
           }
 
           try await peripheral.updateValue(

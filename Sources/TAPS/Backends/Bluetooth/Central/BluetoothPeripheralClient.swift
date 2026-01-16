@@ -66,7 +66,7 @@ extension BluetoothCentral.Peripheral {
 
   public func readNotifications(
     forCharacteristic characteristic: Characteristic,
-    perform: (borrowing Span<UInt8>) async throws -> Void
+    perform: ([UInt8]) async throws -> Void
   ) async throws {
     let notifications = try await connection.notifications(for: characteristic.underlying)
     for try await notification in notifications {
@@ -77,11 +77,7 @@ extension BluetoothCentral.Peripheral {
       case .indication(let value):
         bytes = [UInt8](value)
       }
-      // Allocate a buffer with controlled lifetime for async Span usage
-      let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: bytes.count)
-      _ = buffer.initialize(from: bytes)
-      defer { buffer.deallocate() }
-      try await perform(Span(_unsafeElements: buffer))
+      try await perform(bytes)
     }
   }
 
@@ -89,9 +85,12 @@ extension BluetoothCentral.Peripheral {
     forCharacteristic characteristic: Characteristic,
     _ span: borrowing Span<UInt8>
   ) async throws {
-    let data = span.withUnsafeBytes { buffer in
-      Data(buffer)
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(span.count)
+    for i in 0..<span.count {
+      bytes.append(span[i])
     }
+    let data = Data(bytes)
 
     try await connection.writeValue(
       data,

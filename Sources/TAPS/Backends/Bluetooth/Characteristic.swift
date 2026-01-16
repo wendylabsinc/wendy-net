@@ -2,16 +2,16 @@ public struct BluetoothCharacteristic<Value: Sendable>: Sendable {
   public let serviceId: BluetoothService.ID
   public let id: BluetoothUUID
 
-  public typealias WithValue = (borrowing RawSpan) -> Void
+  public typealias WithBytes = ([UInt8]) -> Void
 
   internal let parse: @Sendable (borrowing Span<UInt8>) throws -> Value
-  internal let write: @Sendable (Value) -> (WithValue) -> Void
+  internal let write: @Sendable (Value) -> (WithBytes) -> Void
 
   public init(
     id: BluetoothUUID,
     serviceId: BluetoothUUID,
     parse: @Sendable @escaping (Span<UInt8>) throws -> Value,
-    write: @Sendable @escaping (Value) -> (WithValue) -> Void
+    write: @Sendable @escaping (Value) -> (WithBytes) -> Void
   ) {
     self.serviceId = serviceId
     self.id = id
@@ -60,8 +60,7 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
     return Characteristics.BatteryLevel(level: span[0])
   } write: { value in
     return { write in
-      let array = InlineArray<1, UInt8>(repeating: value.level)
-      write(array.span.bytes)
+      write([value.level])
     }
   }
 }
@@ -76,7 +75,7 @@ extension BluetoothCharacteristic<Characteristics.LocalName> {
     return Characteristics.LocalName(name: name)
   } write: { value in
     return { write in
-      write(value.name.utf8Span.span.bytes)
+      write(Array(value.name.utf8))
     }
   }
 }
