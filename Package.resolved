@@ -1,13 +1,13 @@
 {
-  "originHash" : "b641f836071eaef83043277553f365c54ae87bf4191eabfa2adf0c763d4a0464",
+  "originHash" : "bea5a7d38fb81f15446674121a464135877ddfd3f2bdf8e9e35c73047ba42d56",
   "pins" : [
     {
       "identity" : "bluetooth",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/wendylabsinc/bluetooth.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "570956c252d32c00e45d02e04b09560ab1ea5a15"
+        "revision" : "570956c252d32c00e45d02e04b09560ab1ea5a15",
+        "version" : "0.1.0"
       }
     },
     {
