@@ -53,10 +53,12 @@ extension BluetoothCentral {
           let peer = Peer(scanResult: scanResult, name: name, _discoveredAt: scanResult.timestamp)
 
           switch reference.underlying {
-          case .any, .named(name):
+          case .any:
             await output.upsert(peer)
-          case .named:
-            ()
+          case .named(let expectedName):
+            if name == expectedName {
+              await output.upsert(peer)
+            }
           }
 
           try await handleResults(output.peers)

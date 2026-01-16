@@ -115,20 +115,20 @@ extension BluetoothCentral.Peripheral {
   ) async throws {
     let discoveredServices = try await connection.discoverServices([characteristic.serviceId.uuid])
 
-    guard discoveredServices.count == 1 else {
+    guard let service = discoveredServices.first else {
       return
     }
 
     let characteristics = try await connection.discoverCharacteristics(
-      for: discoveredServices[0]
+      for: service
     )
 
-    guard characteristics.count == 1 else {
+    guard let gattCharacteristic = characteristics.first(where: { $0.uuid == characteristic.id.uuid }) else {
       return
     }
 
     try await observeCharacteristic(
-      Characteristic(underlying: characteristics[0])
+      Characteristic(underlying: gattCharacteristic)
     ) { value in
       let parsedValue = try characteristic.parse(value.span)
       try await perform(parsedValue)
