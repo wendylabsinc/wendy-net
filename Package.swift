@@ -23,11 +23,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.86.0"),
     .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.29.0"),
     .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
-    .package(url: "https://github.com/PureSwift/Bluetooth.git", from: "7.2.3"),
-    .package(url: "https://github.com/PureSwift/GATT.git", from: "3.3.1"),
-    .package(
-      url: "https://github.com/PureSwift/BluetoothLinux.git",
-      revision: "077f9d36afdae57e12c436842db56ef318e2fd23"),
+    .package(url: "https://github.com/wendylabsinc/bluetooth.git", branch: "main"),
     // Public dependencies
     .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.8.0"),
     .package(url: "https://github.com/apple/swift-http-types.git", from: "1.4.0"),
@@ -57,17 +53,7 @@ let package = Package(
         .product(name: "NIOHTTPTypesHTTP1", package: "swift-nio-extras"),
         .product(name: "AsyncDNSResolver", package: "swift-async-dns-resolver"),
         .product(name: "NIOSSL", package: "swift-nio-ssl"),
-        .product(name: "Bluetooth", package: "Bluetooth"),
-        .product(
-          name: "BluetoothLinux", package: "BluetoothLinux",
-          condition: .when(platforms: [.linux])),
-        .product(
-          name: "GATT", package: "GATT",
-          condition: .when(platforms: [.macOS, .linux])),
-        .product(
-          name: "DarwinGATT", package: "GATT",
-          condition: .when(platforms: [.macOS])
-        ),
+        .product(name: "Bluetooth", package: "bluetooth"),
         // Public dependencies
         .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
         .product(name: "HTTPTypes", package: "swift-http-types"),

@@ -41,13 +41,13 @@ public enum Characteristics {
 }
 
 public enum BluetoothServices {
-  public static let battery = BluetoothUUID(uuid: .bit16(0x180f))
-  public static let genericAccess = BluetoothUUID(uuid: .bit16(0x1800))
+  public static let battery = BluetoothUUID(bit16: 0x180f)
+  public static let genericAccess = BluetoothUUID(bit16: 0x1800)
 }
 
 extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
   public static let batteryLevel = BluetoothCharacteristic(
-    id: BluetoothUUID(uuid: .bit16(0x2a19)),
+    id: BluetoothUUID(bit16: 0x2a19),
     serviceId: BluetoothServices.battery
   ) { span in
     guard
@@ -68,7 +68,7 @@ extension BluetoothCharacteristic<Characteristics.BatteryLevel> {
 
 extension BluetoothCharacteristic<Characteristics.LocalName> {
   public static let localName = BluetoothCharacteristic(
-    id: BluetoothUUID(uuid: .bit16(0x2a00)),
+    id: BluetoothUUID(bit16: 0x2a00),
     serviceId: BluetoothServices.genericAccess
   ) { span in
     let span = try UTF8Span(validating: span)

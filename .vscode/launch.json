@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift-lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:taps}",
+            "name": "Debug TAPSBluetoothExample",
+            "program": "${workspaceFolder:taps}/.build/debug/TAPSBluetoothExample",
+            "preLaunchTask": "swift: Build Debug TAPSBluetoothExample"
+        },
+        {
+            "type": "swift-lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:taps}",
+            "name": "Release TAPSBluetoothExample",
+            "program": "${workspaceFolder:taps}/.build/release/TAPSBluetoothExample",
+            "preLaunchTask": "swift: Build Release TAPSBluetoothExample"
+        }
+    ]
+}

@@ -16,15 +16,16 @@ public struct BluetoothPeripheralClientService: ClientServiceProtocol {
     self.resolve = resolve
   }
 
-  /// Create TCP client with given parameters
+  /// Create Bluetooth peripheral client with given parameters
   public func withConnection<T: Sendable>(
     parameters: Parameters,
     context: TAPSContext,
     perform: @escaping @Sendable (Client) async throws -> T
   ) async throws -> T {
-    let device = try await resolve(context).data.peripheral
+    let peer = try await resolve(context)
+    let peripheral = try await context.bluetoothCentral.connect(to: peer.scanResult)
 
-    return try await context.bluetoothCentral.withConnection(device) { peripheral in
+    return try await context.bluetoothCentral.withConnection(peripheral) { peripheral in
       try await perform(peripheral)
     }
   }

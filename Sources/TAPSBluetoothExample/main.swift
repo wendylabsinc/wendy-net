@@ -5,9 +5,16 @@ import TAPS
 
 let taps = try await TAPS()
 let name = "MyGatt"
-let testServiceId = BluetoothUUID(uuid: UUID(uuidString: "40A74DF2-E238-421D-AE7F-7F3562E8FF6E")!)
+// 40A74DF2-E238-421D-AE7F-7F3562E8FF6E
+let testServiceId = BluetoothUUID(
+  0x40, 0xA7, 0x4D, 0xF2, 0xE2, 0x38, 0x42, 0x1D,
+  0xAE, 0x7F, 0x7F, 0x35, 0x62, 0xE8, 0xFF, 0x6E
+)
+// 40A74DF2-E238-421D-AE7F-7F3562E8FF6F
 let testCharacteristicId = BluetoothUUID(
-  uuid: UUID(uuidString: "40A74DF2-E238-421D-AE7F-7F3562E8FF6F")!)
+  0x40, 0xA7, 0x4D, 0xF2, 0xE2, 0x38, 0x42, 0x1D,
+  0xAE, 0x7F, 0x7F, 0x35, 0x62, 0xE8, 0xFF, 0x6F
+)
 #if os(Linux)
   let isPeripheral = true
 #else
@@ -53,18 +60,9 @@ try await withThrowingTaskGroup { group in
       }
     }
   } else {
-    try await taps.withConnection(
-      to: .tcp(
-        to: .srv(to: "_myprotocol.local"),
-        resolver: .mdns
-      )
-    ) { client in
-      // use TCP connection
-    }
-
     group.addTask {
       try await taps.withConnection(
-        to: .bluetoothPeripheral(.named(name))
+        target: .bluetoothPeripheral(.named(name))
       ) { peripheral in
         print("Connected to \"\(name)\"")
 
@@ -105,7 +103,7 @@ try await withThrowingTaskGroup { group in
 public struct FakeBatteryService: BluetoothServiceProtocol {
   public var id: BluetoothUUID { testServiceId }
   public static var characteristic: BluetoothCharacteristic<Characteristics.BatteryLevel> {
-    BluetoothCharacteristic.fakeBatteryLevel
+    BluetoothCharacteristic<Characteristics.BatteryLevel>.fakeBatteryLevel
   }
 
   public func writeCharacteristics(

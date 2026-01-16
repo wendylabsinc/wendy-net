@@ -1,6 +1,6 @@
 #if canImport(NIOPosix)
-  import AsyncAlgorithms
-  import HTTPTypes
+  public import AsyncAlgorithms
+  public import HTTPTypes
   internal import NIOCore
   internal import NIOHTTP1
   internal import NIOPosix
