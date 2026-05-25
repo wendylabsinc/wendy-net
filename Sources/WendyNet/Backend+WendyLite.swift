@@ -149,12 +149,13 @@ fileprivate final class WendyNetHub: Sendable {
     private let state = _LockedBox(State())
 
     func ensureInitialized() -> Bool {
-        let alreadyInit = state.withLockedValue { s in s.initialized }
-        if alreadyInit { return true }
-        registerWendyNetCallback()
-        let ok = WendyNetNative.initialize() == 0
-        state.withLockedValue { s in s.initialized = ok }
-        return ok
+        state.withLockedValue { s in
+            if s.initialized { return true }
+            registerWendyNetCallback()
+            let ok = WendyNetNative.initialize() == 0
+            s.initialized = ok
+            return ok
+        }
     }
 
     func register(listener: AnyListenerCore) {
