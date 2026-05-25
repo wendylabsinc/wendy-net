@@ -34,7 +34,7 @@ fileprivate final class _LockedBox<T>: @unchecked Sendable {
     }
 }
 
-private let standardEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
+private let standardEventLoopGroup = MultiThreadedEventLoopGroup.singleton
 
 fileprivate typealias NIOByteBufferChannel = NIOAsyncChannel<ByteBuffer, ByteBuffer>
 fileprivate typealias NIOServerInboundChannel = NIOAsyncChannel<NIOByteBufferChannel, Never>
