@@ -88,6 +88,10 @@ private enum WendyNetNative {
         wendynet_listener_close(handle)
     }
 
+    static func listenerPort(_ handle: Int32) -> Int32 {
+        wendynet_listener_port(handle)
+    }
+
     static func socketStatus(_ handle: Int32) -> Int32 {
         wendynet_socket_status(handle)
     }
@@ -913,9 +917,19 @@ extension ServerBootstrap {
             throw .listenerError
         }
 
-        let core = ListenerCore<Message>(handle: handle, port: port, context: context, closures: closures)
+        // Read back the actual bound port. If the caller passed 0 the OS
+        // assigned an ephemeral port; either way the resolved value is what
+        // consumers want exposed on the Listener.
+        let resolvedRaw = WendyNetNative.listenerPort(handle)
+        if resolvedRaw < 0 {
+            WendyNetNative.closeListener(handle)
+            throw .listenerError
+        }
+        let resolvedPort = UInt16(resolvedRaw)
+
+        let core = ListenerCore<Message>(handle: handle, port: resolvedPort, context: context, closures: closures)
         WendyNetState.shared.register(listener: core)
-        return Listener(port: port, core: core)
+        return Listener(port: resolvedPort, core: core)
     }
 }
 

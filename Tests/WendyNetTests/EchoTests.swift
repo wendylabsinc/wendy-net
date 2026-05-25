@@ -41,12 +41,11 @@ private func sendAndReceive(client: Channel<ByteBuffer>, payload: [UInt8], respo
 
 @Test
 func clientServerRoundTrip() async throws {
-    let port: UInt16 = 28443
     let net = WendyNet()
 
     let listener = try await ServerBootstrap(wendyNet: net)
         .security(.insecure)
-        .bind(port: port)
+        .bind(port: 0)
 
     let serverCaptured = TestBox<[UInt8]>([])
     let serverTask = Task {
@@ -55,7 +54,7 @@ func clientServerRoundTrip() async throws {
 
     let client = try await ClientBootstrap(wendyNet: net)
         .security(.insecure)
-        .connect(to: Endpoint(hostname: "127.0.0.1", port: port))
+        .connect(to: Endpoint(hostname: "127.0.0.1", port: listener.port))
 
     let payload: [UInt8] = Array("ping".utf8)
     let responseBox = TestBox<[UInt8]>([])

@@ -503,14 +503,18 @@ extension ServerBootstrap {
             throw .listenerError
         }
 
+        guard let resolvedPort = serverChannel.channel.localAddress?.port.map(UInt16.init) else {
+            throw .listenerError
+        }
+
         let core = ListenerCore<Message>(
-            port: port,
+            port: resolvedPort,
             context: context,
             serverChannel: serverChannel,
             pipelineFactory: pipelineFactory,
             framerFactory: framerFactory
         )
-        return Listener<Message>(port: port, core: core)
+        return Listener<Message>(port: resolvedPort, core: core)
     }
 }
 
