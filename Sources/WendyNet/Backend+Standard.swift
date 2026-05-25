@@ -45,7 +45,7 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
     private struct State {
         // `iterator` is briefly set to nil while a (single) caller is awaiting
         // the next NIO buffer outside the lock. A second concurrent `next()`
-        // call seeing nil here means a programmer error: see fatalError below.
+        // call seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator?
         var pending: [Message] = []
         var error: WendyNetError? = nil
@@ -73,13 +73,15 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
             if let fast { return fast }
 
             // Claim the iterator out of the box. If it's already nil another
-            // caller is awaiting -- single-consumer contract violated.
-            var iter = state.withLockedValue { s -> NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator in
-                guard let i = s.iterator else {
-                    fatalError("attempt to await next() on more than one task")
-                }
+            // caller is awaiting -- single-consumer contract violated; surface
+            // as `.concurrentAccess`.
+            let claimed: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator? = state.withLockedValue { s in
+                let i = s.iterator
                 s.iterator = nil
                 return i
+            }
+            guard var iter = claimed else {
+                return .failure(.concurrentAccess)
             }
 
             // Await outside the lock.
@@ -157,7 +159,8 @@ private final class _ByteBufferOutboundBridge<Message: Sendable>: Sendable {
 private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
     private struct State {
         // `iterator` is briefly nil while a (single) caller is awaiting the
-        // next accepted connection outside the lock; see fatalError below.
+        // next accepted connection outside the lock; a second concurrent call
+        // seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator?
         var ended = false
         var error: WendyNetError? = nil
@@ -188,13 +191,15 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
         }
         if let fast { return fast }
 
-        // Claim the iterator. nil here means another caller is already awaiting.
-        var iter = state.withLockedValue { s -> NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator in
-            guard let i = s.iterator else {
-                fatalError("attempt to await next() on more than one task")
-            }
+        // Claim the iterator. nil here means another caller is already awaiting;
+        // surface as `.concurrentAccess`.
+        let claimed: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator? = state.withLockedValue { s in
+            let i = s.iterator
             s.iterator = nil
             return i
+        }
+        guard var iter = claimed else {
+            return .failure(.concurrentAccess)
         }
 
         let pull: Result<NIOByteBufferChannel?, Error>
@@ -284,16 +289,16 @@ final class ChannelCore<Message: Sendable>: Sendable {
     func executeThenClose<R: Sendable>(
         _ body: @Sendable (Inbound<Message>, Outbound<Message>) async throws(WendyNetError) -> R
     ) async throws(WendyNetError) -> R {
-        // Take ownership of the closures by setting the slot to nil. Atomic with
-        // respect to a concurrent second call -- exactly one caller sees the
-        // closures, the other fatal-errors.
+        // Take ownership of the closures by setting the slot to nil. Atomic
+        // with respect to a concurrent second call -- exactly one caller sees
+        // the closures, the other gets `.alreadyConsumed`.
         let taken: Closures? = closures.withLockedValue { c in
             let v = c
             c = nil
             return v
         }
         guard let taken else {
-            fatalError("executeThenClose called more than once")
+            throw .alreadyConsumed
         }
         let decodeClosure = taken.decode
         let encodeClosure = taken.encode
@@ -375,7 +380,7 @@ final class ListenerCore<Message: Sendable>: Sendable {
             return prev
         }
         if wasAlreadyUsed {
-            fatalError("executeThenClose called more than once")
+            throw .alreadyConsumed
         }
 
         let context = self.context

@@ -275,7 +275,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
                     if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
                     if s.isClosed { return .success(nil) }
                     if s.acceptWaiter != nil {
-                        fatalError("attempt to await next() on more than one task")
+                        return .failure(.concurrentAccess)
                     }
                     s.acceptWaiter = continuation
                     return nil
@@ -302,14 +302,14 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
     func executeThenClose<R: Sendable>(
         _ body: @Sendable (Accepted<Message>) async throws(WendyNetError) -> R
     ) async throws(WendyNetError) -> R {
-        // Atomic check-and-set: exactly one caller wins.
+        // Atomic check-and-set: exactly one caller wins; the other throws.
         let wasAlreadyUsed: Bool = state.withLockedValue { s in
             let prev = s.executeThenCloseUsed
             s.executeThenCloseUsed = true
             return prev
         }
         if wasAlreadyUsed {
-            fatalError("executeThenClose called more than once")
+            throw .alreadyConsumed
         }
 
         let accepted = Accepted<Message>(_next: { [self] in
@@ -474,7 +474,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                     if let err = s.error { return .failure(err) }
                     if s.closed { return .success(nil) }
                     if s.receiveWaiter != nil {
-                        fatalError("attempt to await next() on more than one task")
+                        return .failure(.concurrentAccess)
                     }
                     s.receiveWaiter = continuation
                     return nil
@@ -584,15 +584,16 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         _ body: @Sendable (Inbound<Message>, Outbound<Message>) async throws(WendyNetError) -> R
     ) async throws(WendyNetError) -> R {
         // Atomic check-and-set: exactly one caller wins. A second concurrent
-        // or sequential call fatal-errors. Two concurrent calls would race on
-        // the user's pipeline-stage state via the shared decode/encode closures.
+        // or sequential call throws `.alreadyConsumed`. Two concurrent calls
+        // would race on the user's pipeline-stage state via the shared
+        // decode/encode closures.
         let wasAlreadyUsed: Bool = state.withLockedValue { s in
             let prev = s.executeThenCloseUsed
             s.executeThenCloseUsed = true
             return prev
         }
         if wasAlreadyUsed {
-            fatalError("executeThenClose called more than once")
+            throw .alreadyConsumed
         }
 
         let inbound = Inbound<Message>(_next: { [self] in
