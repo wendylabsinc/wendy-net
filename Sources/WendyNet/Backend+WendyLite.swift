@@ -130,7 +130,6 @@ fileprivate protocol AnyListenerCore: AnyObject, Sendable {
 
 fileprivate protocol AnyChannelCore: AnyObject, Sendable {
     var handle: Int32 { get }
-    var isOpen: Bool { get }
     func drainReadable()
     func notifyWritableOrClosed()
 }
@@ -181,7 +180,7 @@ fileprivate final class WendyNetHub: Sendable {
         }
     }
 
-    func drainNativeEvents() {
+    private func drainNativeEvents() {
         let canDrain: Bool = state.withLockedValue { s in
             if s.isDraining { return false }
             s.isDraining = true
@@ -246,7 +245,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         self.state = _LockedBox(State(closures: closures))
     }
 
-    func accept() async throws(WendyNetError) -> Channel<Message>? {
+    private func accept() async throws(WendyNetError) -> Channel<Message>? {
         // Fast path
         let fast: Result<Channel<Message>?, WendyNetError>? = state.withLockedValue { s in
             if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
@@ -388,7 +387,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         }
     }
 
-    func close() async {
+    private func close() async {
         let (waiter, didFirstClose): (
             CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>?,
             Bool
@@ -438,10 +437,6 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
     }
     private let state: _LockedBox<State>
 
-    var isOpen: Bool {
-        state.withLockedValue { s in !s.closed && s.error == nil }
-    }
-
     init(
         handle: Int32,
         endpoint: Endpoint,
@@ -455,7 +450,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         self.state = _LockedBox(State(decode: decode, encode: encode))
     }
 
-    func receive() async throws(WendyNetError) -> Message? {
+    private func receive() async throws(WendyNetError) -> Message? {
         // Fast paths
         if let early = tryDeliverReceived() {
             switch early {
@@ -512,7 +507,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         }
     }
 
-    func send(_ message: Message) async throws(WendyNetError) -> SendResult {
+    private func send(_ message: Message) async throws(WendyNetError) -> SendResult {
         // Initial gating: error / closed / cancelled.
         let earlyError: WendyNetError? = state.withLockedValue { s in
             if let err = s.error { return err }
@@ -721,7 +716,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         }
     }
 
-    func close() async {
+    private func close() async {
         let firstClose: Bool = state.withLockedValue { s in
             if s.closed { return false }
             s.closed = true
