@@ -43,11 +43,13 @@ fileprivate typealias NIOServerInboundChannel = NIOAsyncChannel<NIOByteBufferCha
 
 private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
     private struct State {
+        // `iterator` is briefly set to nil while a (single) caller is awaiting
+        // the next NIO buffer outside the lock. A second concurrent `next()`
+        // call seeing nil here means a programmer error: see fatalError below.
         var iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator?
         var pending: [Message] = []
         var error: WendyNetError? = nil
         var ended = false
-        var pendingAdvancers: [CheckedContinuation<Void, Never>] = []
         var decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
     }
     private let state: _LockedBox<State>
@@ -59,78 +61,62 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
         self.state = _LockedBox(State(iterator: iterator, decode: decode))
     }
 
-    enum _ClaimAction {
-        case ready(InboundStep<Message>)
-        case advance(NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator)
-        case wait
-    }
-
     func next() async -> InboundStep<Message> {
         while true {
-            let action: _ClaimAction = state.withLockedValue { s in
-                if !s.pending.isEmpty { return .ready(.message(s.pending.removeFirst())) }
-                if let err = s.error { return .ready(.failure(err)) }
-                if s.ended { return .ready(.end) }
-                if let iter = s.iterator {
-                    s.iterator = nil
-                    return .advance(iter)
+            // Fast path: buffered message or terminal state.
+            let fast: InboundStep<Message>? = state.withLockedValue { s in
+                if !s.pending.isEmpty { return .message(s.pending.removeFirst()) }
+                if let err = s.error { return .failure(err) }
+                if s.ended { return .end }
+                return nil
+            }
+            if let fast { return fast }
+
+            // Claim the iterator out of the box. If it's already nil another
+            // caller is awaiting -- single-consumer contract violated.
+            var iter = state.withLockedValue { s -> NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator in
+                guard let i = s.iterator else {
+                    fatalError("attempt to await next() on more than one task")
                 }
-                return .wait
+                s.iterator = nil
+                return i
             }
 
-            switch action {
-            case .ready(let step):
-                return step
-            case .wait:
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    state.withLockedValue { s in s.pendingAdvancers.append(cont) }
-                }
-                continue
-            case .advance(var iter):
-                let pull: Result<ByteBuffer?, Error>
-                do {
-                    let buf = try await iter.next()
-                    pull = .success(buf)
-                } catch {
-                    pull = .failure(error)
-                }
+            // Await outside the lock.
+            let pull: Result<ByteBuffer?, Error>
+            do {
+                let buf = try await iter.next()
+                pull = .success(buf)
+            } catch {
+                pull = .failure(error)
+            }
 
-                let result: InboundStep<Message>? = state.withLockedValue { s in
-                    // Always return the iterator first, then process. If a waiter
-                    // is queued, hand the right to advance to them by returning
-                    // the iterator under their watch.
-                    s.iterator = iter
-                    if let next = s.pendingAdvancers.first {
-                        s.pendingAdvancers.removeFirst()
-                        next.resume()
-                    }
-
-                    switch pull {
-                    case .success(let bufOpt):
-                        guard let buf = bufOpt else {
-                            s.ended = true
-                            return .end
-                        }
-                        // Zero-copy hand-off: pipeline sees NIO's buffer directly.
-                        s.decode(buf, { msg in
-                            s.pending.append(msg)
-                        }, { err in
-                            s.error = err
-                        })
-                        if let err = s.error { return .failure(err) }
-                        if !s.pending.isEmpty { return .message(s.pending.removeFirst()) }
-                        return nil  // caller loops to wait/check again
-                    case .failure(let err):
+            let result: InboundStep<Message>? = state.withLockedValue { s in
+                s.iterator = iter
+                switch pull {
+                case .success(let bufOpt):
+                    guard let buf = bufOpt else {
                         s.ended = true
-                        if err is CancellationError {
-                            return .failure(.cancelled)
-                        }
-                        return .failure(.connectionFailed)
+                        return .end
                     }
+                    // Zero-copy hand-off: pipeline sees NIO's buffer directly.
+                    s.decode(buf, { msg in
+                        s.pending.append(msg)
+                    }, { err in
+                        s.error = err
+                    })
+                    if let err = s.error { return .failure(err) }
+                    if !s.pending.isEmpty { return .message(s.pending.removeFirst()) }
+                    return nil  // loop to deliver from buffered state
+                case .failure(let err):
+                    s.ended = true
+                    if err is CancellationError {
+                        return .failure(.cancelled)
+                    }
+                    return .failure(.connectionFailed)
                 }
-                if let r = result { return r }
-                continue
             }
+            if let result { return result }
         }
     }
 }
@@ -170,10 +156,11 @@ private final class _ByteBufferOutboundBridge<Message: Sendable>: Sendable {
 
 private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
     private struct State {
+        // `iterator` is briefly nil while a (single) caller is awaiting the
+        // next accepted connection outside the lock; see fatalError below.
         var iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator?
         var ended = false
         var error: WendyNetError? = nil
-        var pendingAdvancers: [CheckedContinuation<Void, Never>] = []
     }
     private let state: _LockedBox<State>
     private let context: ConnectionContext
@@ -192,63 +179,47 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
         self.framerFactory = framerFactory
     }
 
-    enum _ClaimAction {
-        case ready(AcceptedStep<Message>)
-        case advance(NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator)
-        case wait
-    }
-
     func next() async -> AcceptedStep<Message> {
-        while true {
-            let action: _ClaimAction = state.withLockedValue { s in
-                if let err = s.error { return .ready(.failure(err)) }
-                if s.ended { return .ready(.end) }
-                if let iter = s.iterator {
-                    s.iterator = nil
-                    return .advance(iter)
-                }
-                return .wait
+        // Fast path: terminal state.
+        let fast: AcceptedStep<Message>? = state.withLockedValue { s in
+            if let err = s.error { return .failure(err) }
+            if s.ended { return .end }
+            return nil
+        }
+        if let fast { return fast }
+
+        // Claim the iterator. nil here means another caller is already awaiting.
+        var iter = state.withLockedValue { s -> NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator in
+            guard let i = s.iterator else {
+                fatalError("attempt to await next() on more than one task")
             }
+            s.iterator = nil
+            return i
+        }
 
-            switch action {
-            case .ready(let step):
-                return step
-            case .wait:
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    state.withLockedValue { s in s.pendingAdvancers.append(cont) }
-                }
-                continue
-            case .advance(var iter):
-                let pull: Result<NIOByteBufferChannel?, Error>
-                do {
-                    let childNIO = try await iter.next()
-                    pull = .success(childNIO)
-                } catch {
-                    pull = .failure(error)
-                }
+        let pull: Result<NIOByteBufferChannel?, Error>
+        do {
+            let childNIO = try await iter.next()
+            pull = .success(childNIO)
+        } catch {
+            pull = .failure(error)
+        }
 
-                let outcome: AcceptedStep<Message> = state.withLockedValue { s in
-                    s.iterator = iter
-                    if let next = s.pendingAdvancers.first {
-                        s.pendingAdvancers.removeFirst()
-                        next.resume()
-                    }
-                    switch pull {
-                    case .success(let opt):
-                        guard let childNIO = opt else {
-                            s.ended = true
-                            return .end
-                        }
-                        return makeAcceptedChannel(childNIO: childNIO)
-                    case .failure(let err):
-                        s.ended = true
-                        if err is CancellationError {
-                            return .failure(.cancelled)
-                        }
-                        return .failure(.listenerError)
-                    }
+        return state.withLockedValue { s in
+            s.iterator = iter
+            switch pull {
+            case .success(let opt):
+                guard let childNIO = opt else {
+                    s.ended = true
+                    return .end
                 }
-                return outcome
+                return makeAcceptedChannel(childNIO: childNIO)
+            case .failure(let err):
+                s.ended = true
+                if err is CancellationError {
+                    return .failure(.cancelled)
+                }
+                return .failure(.listenerError)
             }
         }
     }

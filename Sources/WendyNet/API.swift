@@ -270,6 +270,10 @@ public struct PipelineBuilder {
 /// once the channel closes cleanly. Throws `.cancelled` if the surrounding Task
 /// is cancelled while suspended. Decoded messages already buffered are delivered
 /// even after cancellation.
+///
+/// This is a unicast iterator: only one consumer at a time. It is a programmer
+/// error to invoke `next()` from a concurrent context that contends with
+/// another such call, which results in a call to `fatalError()`.
 public struct Inbound<Message: Sendable>: Sendable {
     let _next: @Sendable () async -> InboundStep<Message>
 
@@ -304,6 +308,10 @@ public struct Outbound<Message: Sendable>: Sendable {
 /// Iterate with `while let channel = try await accepted.next() { ... }`. Returns
 /// nil once the listener closes. Throws `.cancelled` if the surrounding Task is
 /// cancelled while suspended.
+///
+/// This is a unicast iterator: only one consumer at a time. It is a programmer
+/// error to invoke `next()` from a concurrent context that contends with
+/// another such call, which results in a call to `fatalError()`.
 public struct Accepted<Message: Sendable>: Sendable {
     let _next: @Sendable () async -> AcceptedStep<Message>
 

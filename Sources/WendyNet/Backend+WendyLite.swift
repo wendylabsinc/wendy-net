@@ -274,6 +274,9 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
                     if Task.isCancelled { return .failure(.cancelled) }
                     if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
                     if s.isClosed { return .success(nil) }
+                    if s.acceptWaiter != nil {
+                        fatalError("attempt to await next() on more than one task")
+                    }
                     s.acceptWaiter = continuation
                     return nil
                 }
@@ -470,6 +473,9 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                     if !s.decodedMessages.isEmpty { return .success(s.decodedMessages.removeFirst()) }
                     if let err = s.error { return .failure(err) }
                     if s.closed { return .success(nil) }
+                    if s.receiveWaiter != nil {
+                        fatalError("attempt to await next() on more than one task")
+                    }
                     s.receiveWaiter = continuation
                     return nil
                 }
