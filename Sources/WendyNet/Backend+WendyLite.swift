@@ -6,14 +6,48 @@ import _Concurrency
 
 // MARK: - Internal lock primitive
 //
-// Module-local copy of the spinlock-backed lock-box used in the WendyLite
-// library. The canonical rationale lives in `wendy-lite/Sources/WendyLite/
-// Internal.swift` -- this file's `_LockedBox` has the same shape, semantics,
-// and safety story (atomic-spinlock, `@unchecked Sendable`, accepts
-// non-`Sendable` `T` so it can wrap user pipeline-stage closures the same
-// way SwiftNIO confines `ChannelHandler`s to an `EventLoop`). The
-// duplication exists because `_LockedBox` in WendyLite is not part of its
-// public API and we don't want to expose it.
+// `_LockedBox<T>` is a lock-protected carrier for mutable state. It plays
+// the combined role of SwiftNIO's `NIOLockedValueBox` (lock-protected
+// mutation of `Sendable` state) and `NIOLoopBoundBox` (carrier of
+// non-`Sendable` state confined by external discipline). The second role
+// is what makes this version load-bearing for WendyNet.
+//
+// Users implement `PipelineStage` as plain non-`Sendable` classes (mirroring
+// SwiftNIO's `ChannelHandler`). The framework captures their `decode`/`encode`
+// into non-`@Sendable` closures and stores them inside this box, so the box
+// must accept non-`Sendable` `T`. Because the lock serialises every entry to
+// those closures, the user's stage methods are invoked from at most one task
+// at a time -- providing the same effective guarantee SwiftNIO's `EventLoop`
+// provides to its handlers.
+//
+// The hazard `@unchecked Sendable` does NOT protect against: extracting the
+// value out of `withLockedValue` and using it from outside the lock. Don't do
+// that with non-`Sendable` `T`. Audit any `withLockedValue { ... return x }`
+// where `x` is non-`Sendable`.
+//
+// ## Why not `Synchronization.Mutex`?
+//
+// `Mutex.withLock` returns `sending Result`, which is incompatible with
+// returning non-`Sendable` values out of the locked region -- defeating our
+// ability to wrap non-`Sendable` `T`. The atomic-spinlock pattern has no such
+// constraint.
+//
+// WendyLite ships a sibling copy of this type for its own internal use over
+// in `wendy-lite/Sources/WendyLite/Internal.swift`. That copy only wraps
+// `Sendable` state and will move to `Mutex` once Swift 6.4 ships it for the
+// embedded wasm SDK; this copy stays because we genuinely need the non-
+// `Sendable`-T capability.
+//
+// ## Lock implementation
+//
+// `Synchronization.Atomic<Bool>` spinlock. On WASM's single-threaded
+// cooperative executor the spin loop will never iterate -- there is no other
+// thread to contend with, and synchronous code cannot interleave at the lock
+// boundary. The lock is logically a no-op there, but writing it as a real
+// lock (rather than no synchronization at all) means the `@unchecked Sendable`
+// claim is grounded in lock discipline, not in "trust the executor": if WASI
+// ever gains pre-emptive scheduling or multi-threaded executors, the code
+// still works.
 
 fileprivate final class _LockedBox<T>: @unchecked Sendable {
     private let locked = Atomic<Bool>(false)
