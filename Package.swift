@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "WendyNet",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v15),
     ],
     products: [
         .library(name: "WendyNet", targets: ["WendyNet"]),

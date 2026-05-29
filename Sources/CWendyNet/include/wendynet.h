@@ -37,6 +37,11 @@ int wendynet_listener_accept(int listener_handle);
 __attribute__((import_module("wendy"), import_name("wendynet_listener_close")))
 int wendynet_listener_close(int listener_handle);
 
+/* Returns the local port bound to this listener (useful when the caller
+ * passed port 0 and the OS assigned an ephemeral one). -1 on error. */
+__attribute__((import_module("wendy"), import_name("wendynet_listener_port")))
+int wendynet_listener_port(int listener_handle);
+
 __attribute__((import_module("wendy"), import_name("wendynet_socket_status")))
 int wendynet_socket_status(int socket_handle);
 

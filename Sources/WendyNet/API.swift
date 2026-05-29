@@ -10,8 +10,23 @@ let wendyNetMaximumMessageLength = 1024
 
 // MARK: - ByteBuffer
 
+#if WendyNetBackendStandard
+
+@_exported import struct NIOCore.ByteBuffer
+
+/// In Standard mode, WendyNet's `ByteBuffer` is SwiftNIO's `ByteBuffer`.
+/// 
+/// The WendyLite version contains a source-compatible subset of functionality.
+public typealias ByteBuffer = NIOCore.ByteBuffer
+
+#else
+
 /// Contiguous byte storage with read/write cursors suitable for zero-copy
 /// networking. Avoids repeated allocation and copying associated with [UInt8].
+///
+/// The method surface is a subset of SwiftNIO's `ByteBuffer` with matching
+/// signatures, so pipelines compile against either backend; in Standard mode
+/// this type is `typealias`'d to `NIOCore.ByteBuffer` directly.
 ///
 /// Slicing returns a new ByteBuffer that shares backing storage via Swift's
 /// built-in Array CoW.
@@ -51,7 +66,7 @@ public struct ByteBuffer: Sendable {
         return slice
     }
 
-    public mutating func moveReaderIndex(by count: Int) {
+    public mutating func moveReaderIndex(forwardBy count: Int) {
         _readerIndex += count
     }
 
@@ -87,36 +102,62 @@ public struct ByteBuffer: Sendable {
         return value
     }
 
+    /// Yields an `UnsafeRawBufferPointer` over the readable bytes. The pointer
+    /// is only valid for the duration of `body`.
+    public func withUnsafeReadableBytes<R, E: Error>(_ body: (UnsafeRawBufferPointer) throws(E) -> R) throws(E) -> R {
+        var captured: Result<R, E>!
+        _storage.withUnsafeBytes { raw in
+            let readable = UnsafeRawBufferPointer(rebasing: raw[_readerIndex ..< _writerIndex])
+            do throws(E) {
+                captured = .success(try body(readable))
+            } catch {
+                captured = .failure(error)
+            }
+        }
+        return try captured.get()
+    }
+
     // MARK: Write (advances writerIndex)
 
-    public mutating func writeBytes(_ bytes: [UInt8]) {
+    @discardableResult
+    public mutating func writeBytes(_ bytes: [UInt8]) -> Int {
         _storage.append(contentsOf: bytes)
         _writerIndex += bytes.count
+        return bytes.count
     }
 
-    public mutating func writeBuffer(_ other: ByteBuffer) {
-        writeBytes(Array(other._storage[other._readerIndex ..< other._writerIndex]))
+    /// Consumes readable bytes from `buffer` and appends them to `self`.
+    @discardableResult
+    public mutating func writeBuffer(_ buffer: inout ByteBuffer) -> Int {
+        let count = buffer.readableBytes
+        guard count > 0 else { return 0 }
+        _storage.append(contentsOf: buffer._storage[buffer._readerIndex ..< buffer._writerIndex])
+        _writerIndex += count
+        buffer._readerIndex += count
+        return count
     }
 
-    public mutating func writeInteger<T: FixedWidthInteger>(_ value: T) {
+    @discardableResult
+    public mutating func writeInteger<T: FixedWidthInteger>(_ value: T) -> Int {
         let size = MemoryLayout<T>.size
         for i in (0 ..< size).reversed() {
             _storage.append(UInt8(truncatingIfNeeded: value >> (i * 8)))
         }
         _writerIndex += size
+        return size
     }
 
-    public mutating func discardReadBytes() {
-        guard _readerIndex > 0 else { return }
+    @discardableResult
+    public mutating func discardReadBytes() -> Bool {
+        guard _readerIndex > 0 else { return false }
         _storage.removeFirst(_readerIndex)
         _writerIndex -= _readerIndex
         _readerIndex = 0
-    }
-
-    func readableBytesArray() -> [UInt8] {
-        Array(_storage[_readerIndex ..< _writerIndex])
+        return true
     }
 }
+
+#endif
 
 // MARK: - Connection Context
 
@@ -166,7 +207,7 @@ extension PipelineStage {
 
 /// Chains two pipeline stages at compile time.
 /// A.Output must equal B.Input. Enforced by the generic constraint.
-public final class ComposedStage<A: PipelineStage, B: PipelineStage>: PipelineStage, @unchecked Sendable
+public final class ComposedStage<A: PipelineStage, B: PipelineStage>: PipelineStage
     where A.Output == B.Input
 {
     public typealias Input = A.Input
@@ -221,6 +262,86 @@ public struct PipelineBuilder {
     }
 }
 
+// MARK: - Inbound / Outbound
+
+/// Iterator over decoded messages arriving on a channel.
+///
+/// Iterate with `while let msg = try await inbound.next() { ... }`. Returns nil
+/// once the channel closes cleanly. Throws `.cancelled` if the surrounding Task
+/// is cancelled while suspended. Decoded messages already buffered are delivered
+/// even after cancellation.
+///
+/// This is a unicast iterator: only one consumer at a time. Invoking `next()`
+/// from a concurrent context that contends with another such call throws
+/// `WendyNetError.concurrentAccess`.
+public struct Inbound<Message: Sendable>: Sendable {
+    let _next: @Sendable () async -> InboundStep<Message>
+
+    public func next() async throws(WendyNetError) -> Message? {
+        switch await _next() {
+        case .message(let m): return m
+        case .end: return nil
+        case .failure(let error): throw error
+        }
+    }
+}
+
+/// Sink for sending messages on a channel.
+///
+/// `write` honours cancellation: if the surrounding Task is cancelled while the
+/// send is suspended (waiting for backpressure relief or transport completion)
+/// it throws `.cancelled`.
+public struct Outbound<Message: Sendable>: Sendable {
+    let _write: @Sendable (Message) async -> OutboundStep
+
+    @discardableResult
+    public func write(_ msg: Message) async throws(WendyNetError) -> SendResult {
+        switch await _write(msg) {
+        case .accepted(let r): return r
+        case .failure(let error): throw error
+        }
+    }
+}
+
+/// Iterator over connections accepted by a listener.
+///
+/// Iterate with `while let channel = try await accepted.next() { ... }`. Returns
+/// nil once the listener closes. Throws `.cancelled` if the surrounding Task is
+/// cancelled while suspended.
+///
+/// This is a unicast iterator: only one consumer at a time. Invoking `next()`
+/// from a concurrent context that contends with another such call throws
+/// `WendyNetError.concurrentAccess`.
+public struct Accepted<Message: Sendable>: Sendable {
+    let _next: @Sendable () async -> AcceptedStep<Message>
+
+    public func next() async throws(WendyNetError) -> Channel<Message>? {
+        switch await _next() {
+        case .channel(let c): return c
+        case .end: return nil
+        case .failure(let error): throw error
+        }
+    }
+}
+
+/// Internal step results.
+enum InboundStep<Message: Sendable>: Sendable {
+    case message(Message)
+    case end
+    case failure(WendyNetError)
+}
+
+enum OutboundStep: Sendable {
+    case accepted(SendResult)
+    case failure(WendyNetError)
+}
+
+enum AcceptedStep<Message: Sendable>: Sendable {
+    case channel(Channel<Message>)
+    case end
+    case failure(WendyNetError)
+}
+
 // MARK: - Channel
 
 /// A live network connection, generic on the message type produced by the pipeline.
@@ -231,56 +352,61 @@ public struct PipelineBuilder {
 /// The pipeline is compiled into closures at build time. No dynamic casting.
 /// The Channel only knows its final message type.
 ///
-/// Backend-private: `ChannelCore<Message>` is defined by whichever backend file
-/// the build includes (Backend+WendyLite.swift or Backend+Standard.swift). Both
-/// expose the same internal surface this class consumes.
-public final class Channel<Message: Sendable>: @unchecked Sendable {
+/// ## Lifetime
+///
+/// A Channel is driven inside a structured scope via `executeThenClose`. The
+/// channel is automatically closed when the body returns or throws. There is
+/// no separate `close()` method by design -- this guarantees that resources are
+/// released exactly once, on a known boundary, even under cancellation.
+///
+/// ```swift
+/// try await channel.executeThenClose { inbound, outbound in
+///     try await outbound.write(message)
+///     while let reply = try await inbound.next() {
+///         // ...
+///     }
+/// }
+/// ```
+public final class Channel<Message: Sendable>: Sendable {
     public let endpoint: Endpoint
     public let transport: TransportInfo
 
     /// Maximum message size the underlying transport can accept in a single write.
-    public internal(set) var maximumMessageLength: Int
+    public let maximumMessageLength: Int
 
     /// Present after mTLS handshake with a Wendy peer.
-    public internal(set) var remotePeerInfo: PeerInfo?
+    public let remotePeerInfo: PeerInfo?
 
     let _core: ChannelCore<Message>?
 
-    /// Receive the next inbound message. Suspends until available.
-    /// Returns nil when the channel closes.
-    public func receive() async throws(WendyNetError) -> Message? {
+    /// Drive the channel inside a structured scope.
+    ///
+    /// `body` receives an `Inbound` to read decoded messages and an `Outbound`
+    /// to send them. The channel is closed when `body` returns or throws,
+    /// including via cancellation propagation.
+    ///
+    /// If the surrounding Task is cancelled while a `next()` or `write(_:)` call
+    /// is suspended, that call throws `.cancelled`.
+    public func executeThenClose<R: Sendable>(
+        _ body: @Sendable (Inbound<Message>, Outbound<Message>) async throws(WendyNetError) -> R
+    ) async throws(WendyNetError) -> R {
         guard let core = _core else {
             throw .connectionFailed
         }
-        return try await core.receive()
-    }
-
-    /// Send a message through the pipeline. Handles backpressure internally.
-    /// Returns .accepted if the message was enqueued for transmission,
-    /// or .dropped if the transport discarded it (e.g. lossy UDP under congestion).
-    @discardableResult
-    public func send(_ msg: Message) async throws(WendyNetError) -> SendResult {
-        guard let core = _core else {
-            throw .connectionFailed
-        }
-        return try await core.send(msg)
-    }
-
-    public var isOpen: Bool { _core?.isOpen ?? false }
-
-    public func close() async {
-        await _core?.close()
+        return try await core.executeThenClose(body)
     }
 
     init(
         endpoint: Endpoint,
         transport: TransportInfo,
         maximumMessageLength: Int,
+        remotePeerInfo: PeerInfo? = nil,
         core: ChannelCore<Message>? = nil
     ) {
         self.endpoint = endpoint
         self.transport = transport
         self.maximumMessageLength = maximumMessageLength
+        self.remotePeerInfo = remotePeerInfo
         self._core = core
     }
 }
@@ -331,21 +457,54 @@ public struct PeerInfo: Sendable {
 // MARK: - Listener
 
 /// A bound server that accepts inbound connections.
-public final class Listener<Message: Sendable>: @unchecked Sendable {
+///
+/// ## Lifetime
+///
+/// A Listener is driven inside a structured scope via `executeThenClose`. The
+/// listener is automatically closed when the body returns or throws. Accepted
+/// channels are exposed via the `Accepted` iterator; each accepted channel
+/// must itself be driven via its own `executeThenClose`.
+///
+/// Embedded Swift forbids existential `any Error`, so `withThrowingTaskGroup`
+/// is unavailable. Use a non-throwing `withTaskGroup` and contain the accept
+/// loop's typed throws inside a local `do`:
+///
+/// ```swift
+/// try await listener.executeThenClose { (accepted: Accepted<Message>) throws(WendyNetError) -> Void in
+///     await withTaskGroup(of: Void.self) { group in
+///         do throws(WendyNetError) {
+///             while let channel = try await accepted.next() {
+///                 group.addTask {
+///                     _ = try? await channel.executeThenClose { inbound, outbound in
+///                         // handle one connection
+///                     }
+///                 }
+///             }
+///         } catch {
+///             // .closed or .cancelled -- fall through and tear the group down.
+///         }
+///         group.cancelAll()
+///     }
+/// }
+/// ```
+public final class Listener<Message: Sendable>: Sendable {
     public let port: UInt16
     let core: ListenerCore<Message>?
 
-    /// Accept the next inbound connection. Suspends until one arrives.
-    /// Returns nil when the listener is closed.
-    public func accept() async throws(WendyNetError) -> Channel<Message>? {
+    /// Drive the listener inside a structured scope.
+    ///
+    /// `body` receives an `Accepted` iterator over incoming connections. The
+    /// listener is closed when `body` returns or throws.
+    ///
+    /// If the surrounding Task is cancelled while `accepted.next()` is suspended,
+    /// it throws `.cancelled`.
+    public func executeThenClose<R: Sendable>(
+        _ body: @Sendable (Accepted<Message>) async throws(WendyNetError) -> R
+    ) async throws(WendyNetError) -> R {
         guard let core else {
             throw .listenerError
         }
-        return try await core.accept()
-    }
-
-    public func close() async {
-        await core?.close()
+        return try await core.executeThenClose(body)
     }
 
     init(port: UInt16) {
@@ -362,17 +521,17 @@ public final class Listener<Message: Sendable>: @unchecked Sendable {
 // MARK: - Pipeline Closures
 
 /// Closure bundle produced by a pipeline factory.
-struct _PipelineClosures<Message>: Sendable {
-    var decode: @Sendable (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
-    var encode: @Sendable (Message) -> ByteBuffer
-    var started: @Sendable (ConnectionContext) -> Void
+struct _PipelineClosures<Message> {
+    let decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
+    let encode: (Message) -> ByteBuffer
+    let started: (ConnectionContext) -> Void
 }
 
 /// Closure bundle for a framer (ByteBuffer -> ByteBuffer, stream transports only).
-struct _FramerClosures: Sendable {
-    var decode: @Sendable (ByteBuffer, (ByteBuffer) -> Void, (WendyNetError) -> Void) -> Void
-    var encode: @Sendable (ByteBuffer) -> ByteBuffer
-    var started: @Sendable (ConnectionContext) -> Void
+struct _FramerClosures {
+    let decode: (ByteBuffer, (ByteBuffer) -> Void, (WendyNetError) -> Void) -> Void
+    let encode: (ByteBuffer) -> ByteBuffer
+    let started: (ConnectionContext) -> Void
 
     /// Wrap a pipeline's closures so the framer runs first on inbound
     /// and last on outbound.
@@ -458,7 +617,7 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 
     /// Provide a framer factory. A new framer is created per connection and inserted
     /// only when the transport is stream-oriented. Datagram transports skip it.
-    public func framer<F: PipelineStage & Sendable>(
+    public func framer<F: PipelineStage & SendableMetatype>(
         _ factory: @escaping @Sendable () -> F
     ) -> ClientBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
@@ -475,7 +634,7 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 
     /// Attach a pipeline. Each connection gets its own pipeline instances.
     /// Stages are listed sequentially; the compiler verifies types between them.
-    public func pipeline<P: PipelineStage & Sendable>(
+    public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ClientBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
         let framer = _framerFactory
@@ -547,7 +706,7 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
     }
 
     /// Provide a framer factory for accepted connections. Only inserted for stream transports.
-    public func framer<F: PipelineStage & Sendable>(
+    public func framer<F: PipelineStage & SendableMetatype>(
         _ factory: @escaping @Sendable () -> F
     ) -> ServerBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
@@ -564,7 +723,7 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
 
     /// Attach a pipeline for accepted connections.
     /// Stages are listed sequentially; the compiler verifies types between them.
-    public func pipeline<P: PipelineStage & Sendable>(
+    public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ServerBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
         let framer = _framerFactory
@@ -587,11 +746,11 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
 
 // MARK: - WendyNet
 
-/// Top-level entry point. Owns the device identity and discovery state.
-public final class WendyNet: @unchecked Sendable {
-    public var wendyCertificate: String?
-    public var wendyPrivateKey: (any Key)?
-
+/// Top-level entry point. Owns discovery state.
+///
+/// Currently stateless; reserved as the identity/discovery surface for the
+/// not-yet-implemented mDNS/BLE peer discovery story.
+public final class WendyNet: Sendable {
     public init() {}
 
     /// Start discovering peers. Cancel the consuming Task to stop.
@@ -631,6 +790,19 @@ public enum WendyNetError: Error, Sendable {
     case pipelineError
     case protocolError
     case closed
+    /// `executeThenClose` was called more than once on the same `Channel` or
+    /// `Listener`. The resource was consumed and closed by the prior call.
+    case alreadyConsumed
+    /// `next()` was invoked from a concurrent context that contends with
+    /// another such call. `Inbound` and `Accepted` are unicast: only one
+    /// consumer may iterate at a time. See the docs on those types.
+    case concurrentAccess
+    /// The surrounding Task was cancelled while the operation was suspended.
+    ///
+    /// This is the typed-throws analogue of `CancellationError` -- we cannot use
+    /// `CancellationError` directly because every WendyNet API uses typed throws
+    /// with `WendyNetError` for Embedded Swift compatibility.
+    case cancelled
 }
 
 // MARK: - Endpoint
