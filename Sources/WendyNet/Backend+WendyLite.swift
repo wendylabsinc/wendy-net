@@ -70,6 +70,40 @@ fileprivate final class _LockedBox<T>: @unchecked Sendable {
     }
 }
 
+// MARK: - Parked-waiter helper
+//
+// The single-parked-continuation pattern shared by the listener's accept loop
+// and the channel's receive loop: poll for a ready value under the state lock,
+// else park one continuation (a second concurrent caller is rejected via
+// `park`), with cancellation taking and resuming the parked waiter. External
+// events (host drain, close) resume the same waiter field directly.
+//
+//   poll:         ready value, or nil to park
+//   park:         store the continuation, or return a value (e.g. concurrentAccess)
+//   cancelWaiter: take and clear the parked continuation
+private func _parkOrResume<S, R: Sendable>(
+    _ box: _LockedBox<S>,
+    cancelled: R,
+    poll: @escaping @Sendable (inout S) -> R?,
+    park: @escaping @Sendable (inout S, CheckedContinuation<R, Never>) -> R?,
+    cancelWaiter: @escaping @Sendable (inout S) -> CheckedContinuation<R, Never>?
+) async -> R {
+    if let fast = box.withLockedValue({ poll(&$0) }) { return fast }
+    return await withTaskCancellationHandler(operation: {
+        await withCheckedContinuation { (continuation: CheckedContinuation<R, Never>) in
+            let now: R? = box.withLockedValue { s in
+                if Task.isCancelled { return cancelled }
+                if let r = poll(&s) { return r }
+                return park(&s, continuation)
+            }
+            if let now { continuation.resume(returning: now) }
+        }
+    }, onCancel: {
+        let waiter = box.withLockedValue { cancelWaiter(&$0) }
+        waiter?.resume(returning: cancelled)
+    })
+}
+
 private let wendyNetCallbackHandlerID: Int32 = 2
 private let wendyNetEventAcceptReady: Int32 = 1
 private let wendyNetEventReadReady: Int32 = 2
@@ -294,43 +328,26 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         }
 
         drainAccepted()
-        let fast2: Result<Channel<Message>?, WendyNetError>? = state.withLockedValue { s in
-            if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
-            if s.isClosed { return .success(nil) }
-            return nil
-        }
-        if let fast2 {
-            switch fast2 {
-            case .success(let c): return c
-            case .failure(let e): throw e
-            }
-        }
 
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Channel<Message>?, WendyNetError> in
-            await withCheckedContinuation { (continuation: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>) in
-                let resume: Result<Channel<Message>?, WendyNetError>? = state.withLockedValue { s in
-                    if Task.isCancelled { return .failure(.cancelled) }
-                    if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
-                    if s.isClosed { return .success(nil) }
-                    if s.acceptWaiter != nil {
-                        return .failure(.concurrentAccess)
-                    }
-                    s.acceptWaiter = continuation
-                    return nil
-                }
-                if let resume {
-                    continuation.resume(returning: resume)
-                }
+        let result = await _parkOrResume(
+            state,
+            cancelled: Result<Channel<Message>?, WendyNetError>.failure(.cancelled),
+            poll: { s in
+                if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
+                if s.isClosed { return .success(nil) }
+                return nil
+            },
+            park: { s, continuation in
+                if s.acceptWaiter != nil { return .failure(.concurrentAccess) }
+                s.acceptWaiter = continuation
+                return nil
+            },
+            cancelWaiter: { s in
+                let w = s.acceptWaiter
+                s.acceptWaiter = nil
+                return w
             }
-        }, onCancel: { [self] in
-            let waiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? =
-                state.withLockedValue { s in
-                    let w = s.acceptWaiter
-                    s.acceptWaiter = nil
-                    return w
-                }
-            waiter?.resume(returning: .failure(.cancelled))
-        })
+        )
         switch result {
         case .success(let channel): return channel
         case .failure(let error): throw error
@@ -493,39 +510,27 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             }
         }
         drainReadable()
-        if let early = tryDeliverReceived() {
-            switch early {
-            case .success(let m): return m
-            case .failure(let e): throw e
-            }
-        }
 
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Message?, WendyNetError> in
-            await withCheckedContinuation { (continuation: CheckedContinuation<Result<Message?, WendyNetError>, Never>) in
-                let resumeNow: Result<Message?, WendyNetError>? = state.withLockedValue { s in
-                    if Task.isCancelled { return .failure(.cancelled) }
-                    if !s.decodedMessages.isEmpty { return .success(s.decodedMessages.removeFirst()) }
-                    if let err = s.error { return .failure(err) }
-                    if s.closed { return .success(nil) }
-                    if s.receiveWaiter != nil {
-                        return .failure(.concurrentAccess)
-                    }
-                    s.receiveWaiter = continuation
-                    return nil
-                }
-                if let resumeNow {
-                    continuation.resume(returning: resumeNow)
-                }
+        let result = await _parkOrResume(
+            state,
+            cancelled: Result<Message?, WendyNetError>.failure(.cancelled),
+            poll: { s in
+                if !s.decodedMessages.isEmpty { return .success(s.decodedMessages.removeFirst()) }
+                if let err = s.error { return .failure(err) }
+                if s.closed { return .success(nil) }
+                return nil
+            },
+            park: { s, continuation in
+                if s.receiveWaiter != nil { return .failure(.concurrentAccess) }
+                s.receiveWaiter = continuation
+                return nil
+            },
+            cancelWaiter: { s in
+                let w = s.receiveWaiter
+                s.receiveWaiter = nil
+                return w
             }
-        }, onCancel: { [self] in
-            let waiter: CheckedContinuation<Result<Message?, WendyNetError>, Never>? =
-                state.withLockedValue { s in
-                    let w = s.receiveWaiter
-                    s.receiveWaiter = nil
-                    return w
-                }
-            waiter?.resume(returning: .failure(.cancelled))
-        })
+        )
         switch result {
         case .success(let message): return message
         case .failure(let error): throw error
