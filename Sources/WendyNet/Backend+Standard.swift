@@ -39,26 +39,60 @@ private let standardEventLoopGroup = MultiThreadedEventLoopGroup.singleton
 fileprivate typealias NIOByteBufferChannel = NIOAsyncChannel<ByteBuffer, ByteBuffer>
 fileprivate typealias NIOServerInboundChannel = NIOAsyncChannel<NIOByteBufferChannel, Never>
 
-// MARK: - Inbound bridge
+// MARK: - Inbound / outbound bridges
 
-private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
+/// Pulls `ByteBuffer`s from a NIO async-channel inbound stream, enforcing the
+/// single-consumer contract: a second concurrent pull observing the claimed-out
+/// iterator surfaces `.concurrentAccess`.
+private final class _NIOByteSource: Sendable {
     private struct State {
-        // `iterator` is briefly set to nil while a (single) caller is awaiting
-        // the next NIO buffer outside the lock. A second concurrent `next()`
-        // call seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator?
+    }
+    private let state: _LockedBox<State>
+
+    init(iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator) {
+        self.state = _LockedBox(State(iterator: iterator))
+    }
+
+    func pull() async -> Result<ByteBuffer?, WendyNetError> {
+        let claimed: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator? =
+            state.withLockedValue { s in
+                let i = s.iterator
+                s.iterator = nil
+                return i
+            }
+        guard var iter = claimed else {
+            return .failure(.concurrentAccess)
+        }
+        let result: Result<ByteBuffer?, WendyNetError>
+        do {
+            result = .success(try await iter.next())
+        } catch is CancellationError {
+            result = .failure(.cancelled)
+        } catch {
+            result = .failure(.connectionFailed)
+        }
+        state.withLockedValue { s in s.iterator = iter }
+        return result
+    }
+}
+
+private final class _InboundBridge<Message: Sendable>: Sendable {
+    private struct State {
         var pending: [Message] = []
         var error: WendyNetError? = nil
         var ended = false
         var decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
     }
     private let state: _LockedBox<State>
+    private let pull: @Sendable () async -> Result<ByteBuffer?, WendyNetError>
 
     init(
-        iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator,
-        decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
+        decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void,
+        pull: @escaping @Sendable () async -> Result<ByteBuffer?, WendyNetError>
     ) {
-        self.state = _LockedBox(State(iterator: iterator, decode: decode))
+        self.state = _LockedBox(State(decode: decode))
+        self.pull = pull
     }
 
     func next() async -> InboundStep<Message> {
@@ -72,36 +106,16 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
             }
             if let fast { return fast }
 
-            // Claim the iterator out of the box. If it's already nil another
-            // caller is awaiting -- single-consumer contract violated; surface
-            // as `.concurrentAccess`.
-            let claimed: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator? = state.withLockedValue { s in
-                let i = s.iterator
-                s.iterator = nil
-                return i
-            }
-            guard var iter = claimed else {
-                return .failure(.concurrentAccess)
-            }
-
-            // Await outside the lock.
-            let pull: Result<ByteBuffer?, Error>
-            do {
-                let buf = try await iter.next()
-                pull = .success(buf)
-            } catch {
-                pull = .failure(error)
-            }
+            let pulled = await pull()
 
             let result: InboundStep<Message>? = state.withLockedValue { s in
-                s.iterator = iter
-                switch pull {
+                switch pulled {
                 case .success(let bufOpt):
                     guard let buf = bufOpt else {
                         s.ended = true
                         return .end
                     }
-                    // Zero-copy hand-off: pipeline sees NIO's buffer directly.
+                    // Zero-copy hand-off: pipeline sees the source buffer directly.
                     s.decode(buf, { msg in
                         s.pending.append(msg)
                     }, { err in
@@ -109,13 +123,10 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
                     })
                     if let err = s.error { return .failure(err) }
                     if !s.pending.isEmpty { return .message(s.pending.removeFirst()) }
-                    return nil  // loop to deliver from buffered state
+                    return nil  // decoded zero messages; pull again
                 case .failure(let err):
                     s.ended = true
-                    if err is CancellationError {
-                        return .failure(.cancelled)
-                    }
-                    return .failure(.connectionFailed)
+                    return .failure(err)
                 }
             }
             if let result { return result }
@@ -123,34 +134,26 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
     }
 }
 
-// MARK: - Outbound bridge
-
-private final class _ByteBufferOutboundBridge<Message: Sendable>: Sendable {
+private final class _OutboundBridge<Message: Sendable>: Sendable {
     private struct State {
         var encode: (Message) -> ByteBuffer
     }
     private let state: _LockedBox<State>
-    fileprivate let nioOutbound: NIOAsyncChannelOutboundWriter<ByteBuffer>
+    private let sink: @Sendable (ByteBuffer) async -> OutboundStep
 
     init(
-        nioOutbound: NIOAsyncChannelOutboundWriter<ByteBuffer>,
-        encode: @escaping (Message) -> ByteBuffer
+        encode: @escaping (Message) -> ByteBuffer,
+        sink: @escaping @Sendable (ByteBuffer) async -> OutboundStep
     ) {
-        self.nioOutbound = nioOutbound
         self.state = _LockedBox(State(encode: encode))
+        self.sink = sink
     }
 
     func write(_ msg: Message) async -> OutboundStep {
-        // Zero-copy hand-off: pipeline-produced buffer goes straight to NIO.
+        // Encode under lock (may mutate user stage state); the CoW buffer then
+        // travels to the sink without copying.
         let buf = state.withLockedValue { s in s.encode(msg) }
-        do {
-            try await nioOutbound.write(buf)
-        } catch is CancellationError {
-            return .failure(.cancelled)
-        } catch {
-            return .failure(.connectionFailed)
-        }
-        return .accepted(.accepted)
+        return await sink(buf)
     }
 }
 
@@ -306,13 +309,23 @@ final class ChannelCore<Message: Sendable>: Sendable {
         let outcome: Result<R, WendyNetError>
         do {
             outcome = try await nioAsyncChannel.executeThenClose { nioInbound, nioOutbound -> Result<R, WendyNetError> in
-                let inboundBridge = _ByteBufferInboundBridge<Message>(
-                    iterator: nioInbound.makeAsyncIterator(),
-                    decode: decodeClosure
+                let source = _NIOByteSource(iterator: nioInbound.makeAsyncIterator())
+                let inboundBridge = _InboundBridge<Message>(
+                    decode: decodeClosure,
+                    pull: { [source] in await source.pull() }
                 )
-                let outboundBridge = _ByteBufferOutboundBridge<Message>(
-                    nioOutbound: nioOutbound,
-                    encode: encodeClosure
+                let outboundBridge = _OutboundBridge<Message>(
+                    encode: encodeClosure,
+                    sink: { [nioOutbound] buf in
+                        do {
+                            try await nioOutbound.write(buf)
+                        } catch is CancellationError {
+                            return .failure(.cancelled)
+                        } catch {
+                            return .failure(.connectionFailed)
+                        }
+                        return .accepted(.accepted)
+                    }
                 )
 
                 let inbound = Inbound<Message>(_next: { [inboundBridge] in
