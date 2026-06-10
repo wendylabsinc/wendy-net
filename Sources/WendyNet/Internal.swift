@@ -22,6 +22,30 @@ enum AcceptedStep<Message: Sendable>: Sendable {
     case failure(WendyNetError)
 }
 
+// MARK: - Idle timer
+
+/// Backend-agnostic idle-timeout loop for a UDP association, run as a child of
+/// the channel's `executeThenClose` scope so it is cancelled when the channel
+/// is done. `remaining` reports the time left until the deadline (`timeout`
+/// since last activity), `nil` once the association has ended, or `<= .zero`
+/// once it has expired; `sleep` waits for a `Duration`, returning `false` if
+/// cancelled; `evict` reclaims the idle association. Re-reading `remaining`
+/// after each sleep reschedules precisely against the latest activity.
+func runIdleTimer(
+    remaining: @Sendable () -> Duration?,
+    sleep: @Sendable (Duration) async -> Bool,
+    evict: @Sendable () async -> Void
+) async {
+    while true {
+        guard let left = remaining() else { return }
+        if left <= .zero {
+            await evict()
+            return
+        }
+        if await sleep(left) == false { return }  // cancelled
+    }
+}
+
 // MARK: - Pipeline closures
 
 /// Closure bundle produced by a pipeline factory.
@@ -65,7 +89,7 @@ struct FramerClosures {
 /// Shared configuration backing both `ClientBootstrap` and `ServerBootstrap`.
 struct BootstrapConfig<Message: Sendable>: Sendable {
     var security: SecurityMode = .insecure
-    var udpAssociationTimeoutSeconds: Int = 60
+    var reliability: Reliability = .reliable
     let pipelineFactory: @Sendable () -> PipelineClosures<Message>
     var framerFactory: (@Sendable () -> FramerClosures)? = nil
 
@@ -90,7 +114,7 @@ struct BootstrapConfig<Message: Sendable>: Sendable {
     ) -> BootstrapConfig<New> {
         BootstrapConfig<New>(
             security: security,
-            udpAssociationTimeoutSeconds: udpAssociationTimeoutSeconds,
+            reliability: reliability,
             pipelineFactory: pipelineFactory,
             framerFactory: framerFactory
         )

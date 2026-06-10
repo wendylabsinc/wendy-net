@@ -336,6 +336,11 @@ public struct Outbound<Message: Sendable>: Sendable {
 /// This is a unicast iterator: only one consumer at a time. Invoking `next()`
 /// from a concurrent context that contends with another such call throws
 /// `WendyNetError.concurrentAccess`.
+///
+/// Each accepted channel must be driven with `executeThenClose`; that scope is
+/// what releases the connection (and, for a UDP listener, the per-peer
+/// association and its idle timer). Accepting a channel and dropping it without
+/// running `executeThenClose` holds those resources until the listener closes.
 public struct Accepted<Message: Sendable>: Sendable {
     let nextStep: @Sendable () async -> AcceptedStep<Message>
 
@@ -436,6 +441,23 @@ public enum TransportKind: Sendable {
     case bluetoothL2CAP
 }
 
+// MARK: - Reliability
+
+/// Whether the application requires reliable, in-order delivery.
+///
+/// `.reliable` selects a stream transport (TCP today): bytes arrive in order
+/// and without loss, and any configured framer is applied.
+///
+/// `.unreliable` selects a datagram transport (UDP today): each `write` maps to
+/// one datagram, which may be dropped or reordered in transit. A successful
+/// `write` only means the datagram was handed to the transport; there is no
+/// per-write delivery signal. Framers are not applied; datagrams already carry
+/// their own message boundaries.
+public enum Reliability: Sendable {
+    case reliable
+    case unreliable
+}
+
 // MARK: - Peer Info
 
 public struct PeerInfo: Sendable {
@@ -533,7 +555,7 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 
     // Accessors used by the backend `connect(to:)` extensions.
     var security: SecurityMode { config.security }
-    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var reliability: Reliability { config.reliability }
     var pipelineFactory: @Sendable () -> PipelineClosures<Message> { config.pipelineFactory }
     var framerFactory: (@Sendable () -> FramerClosures)? { config.framerFactory }
 
@@ -554,9 +576,10 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
         return copy
     }
 
-    public func udpAssociationTimeout(seconds: Int) -> ClientBootstrap {
+    /// Select reliable or unreliable transport.
+    public func reliability(_ mode: Reliability) -> ClientBootstrap {
         var copy = self
-        copy.config.udpAssociationTimeoutSeconds = seconds
+        copy.config.reliability = mode
         return copy
     }
 
@@ -590,10 +613,13 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 public struct ServerBootstrap<Message: Sendable>: Sendable {
     let wendyNet: WendyNet
     var config: BootstrapConfig<Message>
+    /// Idle timeout for per-peer UDP associations. Server-only: each source
+    /// address is a separate association, unlike a client's single peer.
+    var udpAssociationTimeout: Duration = .seconds(60)
 
     // Accessors used by the backend `bind(port:)` extensions.
     var security: SecurityMode { config.security }
-    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var reliability: Reliability { config.reliability }
     var pipelineFactory: @Sendable () -> PipelineClosures<Message> { config.pipelineFactory }
     var framerFactory: (@Sendable () -> FramerClosures)? { config.framerFactory }
 
@@ -602,9 +628,14 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
         self.config = .passthrough()
     }
 
-    init(wendyNet: WendyNet, config: BootstrapConfig<Message>) {
+    init(
+        wendyNet: WendyNet,
+        config: BootstrapConfig<Message>,
+        udpAssociationTimeout: Duration = .seconds(60)
+    ) {
         self.wendyNet = wendyNet
         self.config = config
+        self.udpAssociationTimeout = udpAssociationTimeout
     }
 
     public func security(_ mode: SecurityMode) -> ServerBootstrap {
@@ -613,9 +644,20 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
         return copy
     }
 
-    public func udpAssociationTimeout(seconds: Int) -> ServerBootstrap {
+    /// Select reliable or unreliable transport.
+    public func reliability(_ mode: Reliability) -> ServerBootstrap {
         var copy = self
-        copy.config.udpAssociationTimeoutSeconds = seconds
+        copy.config.reliability = mode
+        return copy
+    }
+
+    /// Idle timeout for per-peer UDP associations on a datagram listener. Each
+    /// distinct source address is a separate association; one that goes idle
+    /// for longer than this is closed (its accepted channel sees end-of-stream)
+    /// and its resources reclaimed. Ignored for stream transports.
+    public func udpAssociationTimeout(_ timeout: Duration) -> ServerBootstrap {
+        var copy = self
+        copy.udpAssociationTimeout = timeout
         return copy
     }
 
@@ -635,7 +677,8 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
     ) -> ServerBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
         ServerBootstrap<P.Output>(
             wendyNet: wendyNet,
-            config: config.reframed(pipelineFactory: makePipelineClosures(build))
+            config: config.reframed(pipelineFactory: makePipelineClosures(build)),
+            udpAssociationTimeout: udpAssociationTimeout
         )
     }
 }
