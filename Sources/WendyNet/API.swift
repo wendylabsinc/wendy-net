@@ -864,7 +864,7 @@ public struct DiscoveryOptions: Sendable {
 public enum SecurityMode: Sendable {
     case wendyPeer
     case insecure
-    case tls(tls: TLSOptions)
+    case tls(TLSOptions)
 }
 
 public struct TLSOptions: Sendable {
