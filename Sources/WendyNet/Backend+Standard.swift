@@ -19,7 +19,7 @@ import _Concurrency
 // and would not accept our `State` containing non-`Sendable` user closures,
 // which is why we need this carrier rather than NIO's stock primitive.
 
-fileprivate final class _LockedBox<T>: @unchecked Sendable {
+fileprivate final class LockedBox<T>: @unchecked Sendable {
     private let lock = NIOLock()
     private var value: T
 
@@ -44,14 +44,14 @@ fileprivate typealias NIOServerInboundChannel = NIOAsyncChannel<NIOByteBufferCha
 /// Pulls `ByteBuffer`s from a NIO async-channel inbound stream, enforcing the
 /// single-consumer contract: a second concurrent pull observing the claimed-out
 /// iterator surfaces `.concurrentAccess`.
-private final class _NIOByteSource: Sendable {
+private final class NIOByteSource: Sendable {
     private struct State {
         var iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator?
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
 
     init(iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator) {
-        self.state = _LockedBox(State(iterator: iterator))
+        self.state = LockedBox(State(iterator: iterator))
     }
 
     func pull() async -> Result<ByteBuffer?, WendyNetError> {
@@ -77,21 +77,21 @@ private final class _NIOByteSource: Sendable {
     }
 }
 
-private final class _InboundBridge<Message: Sendable>: Sendable {
+private final class InboundBridge<Message: Sendable>: Sendable {
     private struct State {
         var pending: [Message] = []
         var error: WendyNetError? = nil
         var ended = false
         var decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
     private let pull: @Sendable () async -> Result<ByteBuffer?, WendyNetError>
 
     init(
         decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void,
         pull: @escaping @Sendable () async -> Result<ByteBuffer?, WendyNetError>
     ) {
-        self.state = _LockedBox(State(decode: decode))
+        self.state = LockedBox(State(decode: decode))
         self.pull = pull
     }
 
@@ -134,18 +134,18 @@ private final class _InboundBridge<Message: Sendable>: Sendable {
     }
 }
 
-private final class _OutboundBridge<Message: Sendable>: Sendable {
+private final class OutboundBridge<Message: Sendable>: Sendable {
     private struct State {
         var encode: (Message) -> ByteBuffer
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
     private let sink: @Sendable (ByteBuffer) async -> OutboundStep
 
     init(
         encode: @escaping (Message) -> ByteBuffer,
         sink: @escaping @Sendable (ByteBuffer) async -> OutboundStep
     ) {
-        self.state = _LockedBox(State(encode: encode))
+        self.state = LockedBox(State(encode: encode))
         self.sink = sink
     }
 
@@ -159,7 +159,7 @@ private final class _OutboundBridge<Message: Sendable>: Sendable {
 
 // MARK: - Accept bridge
 
-private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
+private final class AcceptIteratorBox<Message: Sendable>: Sendable {
     private struct State {
         // `iterator` is briefly nil while a (single) caller is awaiting the
         // next accepted connection outside the lock; a second concurrent call
@@ -168,18 +168,18 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
         var ended = false
         var error: WendyNetError? = nil
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
     private let context: ConnectionContext
-    private let pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    private let framerFactory: (@Sendable () -> _FramerClosures)?
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
 
     init(
         iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator,
         context: ConnectionContext,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
     ) {
-        self.state = _LockedBox(State(iterator: iterator))
+        self.state = LockedBox(State(iterator: iterator))
         self.context = context
         self.pipelineFactory = pipelineFactory
         self.framerFactory = framerFactory
@@ -258,7 +258,7 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
 
 // MARK: - ChannelCore
 //
-// Sendable. The non-Sendable pipeline closures live inside `_LockedBox<Closures?>`
+// Sendable. The non-Sendable pipeline closures live inside `LockedBox<Closures?>`
 // and are consumed (set to nil) on the first call to `executeThenClose`,
 // after which the bridges own them. A second call sees nil and fatal-errors:
 // `executeThenClose` is documented as one-shot, and two concurrent calls
@@ -274,7 +274,7 @@ final class ChannelCore<Message: Sendable>: Sendable {
         let decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
         let encode: (Message) -> ByteBuffer
     }
-    private let closures: _LockedBox<Closures?>
+    private let closures: LockedBox<Closures?>
 
     fileprivate init(
         nioAsyncChannel: NIOByteBufferChannel,
@@ -286,7 +286,7 @@ final class ChannelCore<Message: Sendable>: Sendable {
         self.nioAsyncChannel = nioAsyncChannel
         self.endpoint = endpoint
         self.transport = transport
-        self.closures = _LockedBox(Closures(decode: decode, encode: encode))
+        self.closures = LockedBox(Closures(decode: decode, encode: encode))
     }
 
     func executeThenClose<R: Sendable>(
@@ -309,12 +309,12 @@ final class ChannelCore<Message: Sendable>: Sendable {
         let outcome: Result<R, WendyNetError>
         do {
             outcome = try await nioAsyncChannel.executeThenClose { nioInbound, nioOutbound -> Result<R, WendyNetError> in
-                let source = _NIOByteSource(iterator: nioInbound.makeAsyncIterator())
-                let inboundBridge = _InboundBridge<Message>(
+                let source = NIOByteSource(iterator: nioInbound.makeAsyncIterator())
+                let inboundBridge = InboundBridge<Message>(
                     decode: decodeClosure,
                     pull: { [source] in await source.pull() }
                 )
-                let outboundBridge = _OutboundBridge<Message>(
+                let outboundBridge = OutboundBridge<Message>(
                     encode: encodeClosure,
                     sink: { [nioOutbound] buf in
                         do {
@@ -328,10 +328,10 @@ final class ChannelCore<Message: Sendable>: Sendable {
                     }
                 )
 
-                let inbound = Inbound<Message>(_next: { [inboundBridge] in
+                let inbound = Inbound<Message>(nextStep: { [inboundBridge] in
                     await inboundBridge.next()
                 })
-                let outbound = Outbound<Message>(_write: { [outboundBridge] msg in
+                let outbound = Outbound<Message>(writeStep: { [outboundBridge] msg in
                     await outboundBridge.write(msg)
                 })
 
@@ -361,17 +361,17 @@ final class ListenerCore<Message: Sendable>: Sendable {
     let port: UInt16
     let context: ConnectionContext
     fileprivate let serverChannel: NIOServerInboundChannel
-    private let pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    private let framerFactory: (@Sendable () -> _FramerClosures)?
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
     /// Single-use latch -- see `executeThenClose` for rationale.
-    private let used = _LockedBox<Bool>(false)
+    private let used = LockedBox<Bool>(false)
 
     fileprivate init(
         port: UInt16,
         context: ConnectionContext,
         serverChannel: NIOServerInboundChannel,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
     ) {
         self.port = port
         self.context = context
@@ -403,13 +403,13 @@ final class ListenerCore<Message: Sendable>: Sendable {
         let outcome: Result<R, WendyNetError>
         do {
             outcome = try await serverChannel.executeThenClose { acceptStream -> Result<R, WendyNetError> in
-                let bridge = _AcceptIteratorBox<Message>(
+                let bridge = AcceptIteratorBox<Message>(
                     iterator: acceptStream.makeAsyncIterator(),
                     context: context,
                     pipelineFactory: pipelineFactory,
                     framerFactory: framerFactory
                 )
-                let accepted = Accepted<Message>(_next: { [bridge] in
+                let accepted = Accepted<Message>(nextStep: { [bridge] in
                     await bridge.next()
                 })
 
@@ -450,8 +450,8 @@ extension ClientBootstrap {
         }
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 
@@ -498,8 +498,8 @@ extension ServerBootstrap {
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
 
-        let pipelineFactory = self._pipelineFactory
-        let framerFactory = self._framerFactory
+        let pipelineFactory = self.pipelineFactory
+        let framerFactory = self.framerFactory
 
         let serverChannel: NIOServerInboundChannel
         do {

@@ -6,7 +6,7 @@ import _Concurrency
 
 // MARK: - Internal lock primitive
 //
-// `_LockedBox<T>` is a lock-protected carrier for mutable state. It plays
+// `LockedBox<T>` is a lock-protected carrier for mutable state. It plays
 // the combined role of SwiftNIO's `NIOLockedValueBox` (lock-protected
 // mutation of `Sendable` state) and `NIOLoopBoundBox` (carrier of
 // non-`Sendable` state confined by external discipline). The second role
@@ -49,7 +49,7 @@ import _Concurrency
 // ever gains pre-emptive scheduling or multi-threaded executors, the code
 // still works.
 
-fileprivate final class _LockedBox<T>: @unchecked Sendable {
+fileprivate final class LockedBox<T>: @unchecked Sendable {
     private let locked = Atomic<Bool>(false)
     private var value: T
 
@@ -81,8 +81,8 @@ fileprivate final class _LockedBox<T>: @unchecked Sendable {
 //   poll:         ready value, or nil to park
 //   park:         store the continuation, or return a value (e.g. concurrentAccess)
 //   cancelWaiter: take and clear the parked continuation
-private func _parkOrResume<S, R: Sendable>(
-    _ box: _LockedBox<S>,
+private func parkOrResume<S, R: Sendable>(
+    _ box: LockedBox<S>,
     cancelled: R,
     poll: @escaping @Sendable (inout S) -> R?,
     park: @escaping @Sendable (inout S, CheckedContinuation<R, Never>) -> R?,
@@ -213,7 +213,7 @@ fileprivate final class WendyNetHub: Sendable {
         var isDraining = false
         var initialized = false
     }
-    private let state = _LockedBox(State())
+    private let state = LockedBox(State())
 
     func ensureInitialized() -> Bool {
         state.withLockedValue { s in
@@ -300,17 +300,17 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         var pendingChannels: [Channel<Message>] = []
         var acceptWaiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? = nil
         var isClosed = false
-        var closures: _PipelineClosures<Message>
+        var closures: PipelineClosures<Message>
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
 
-    init(handle: Int32, port: UInt16, context: ConnectionContext, closures: _PipelineClosures<Message>) {
+    init(handle: Int32, port: UInt16, context: ConnectionContext, closures: PipelineClosures<Message>) {
         self.handle = handle
         self.port = port
         self.context = context
-        self.state = _LockedBox(State(closures: closures))
+        self.state = LockedBox(State(closures: closures))
     }
 
     private func accept() async throws(WendyNetError) -> Channel<Message>? {
@@ -329,7 +329,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
 
         drainAccepted()
 
-        let result = await _parkOrResume(
+        let result = await parkOrResume(
             state,
             cancelled: Result<Channel<Message>?, WendyNetError>.failure(.cancelled),
             poll: { s in
@@ -367,7 +367,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
             throw .alreadyConsumed
         }
 
-        let accepted = Accepted<Message>(_next: { [self] in
+        let accepted = Accepted<Message>(nextStep: { [self] in
             do throws(WendyNetError) {
                 if let channel = try await accept() {
                     return .channel(channel)
@@ -486,7 +486,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
 
     init(
         handle: Int32,
@@ -498,7 +498,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         self.handle = handle
         self.endpoint = endpoint
         self.transport = transport
-        self.state = _LockedBox(State(decode: decode, encode: encode))
+        self.state = LockedBox(State(decode: decode, encode: encode))
     }
 
     private func receive() async throws(WendyNetError) -> Message? {
@@ -511,7 +511,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         }
         drainReadable()
 
-        let result = await _parkOrResume(
+        let result = await parkOrResume(
             state,
             cancelled: Result<Message?, WendyNetError>.failure(.cancelled),
             poll: { s in
@@ -635,7 +635,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             throw .alreadyConsumed
         }
 
-        let inbound = Inbound<Message>(_next: { [self] in
+        let inbound = Inbound<Message>(nextStep: { [self] in
             do throws(WendyNetError) {
                 if let msg = try await receive() {
                     return .message(msg)
@@ -645,7 +645,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 return .failure(error)
             }
         })
-        let outbound = Outbound<Message>(_write: { [self] msg in
+        let outbound = Outbound<Message>(writeStep: { [self] msg in
             do throws(WendyNetError) {
                 let result = try await send(msg)
                 return .accepted(result)
@@ -894,8 +894,8 @@ extension ClientBootstrap {
         }
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 
@@ -939,8 +939,8 @@ extension ServerBootstrap {
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 
