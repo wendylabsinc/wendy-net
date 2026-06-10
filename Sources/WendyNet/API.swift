@@ -556,6 +556,71 @@ struct _FramerClosures {
     }
 }
 
+// MARK: - Bootstrap configuration
+
+/// Shared configuration backing both `ClientBootstrap` and `ServerBootstrap`.
+struct _BootstrapConfig<Message: Sendable>: Sendable {
+    var security: SecurityMode = .insecure
+    var udpAssociationTimeoutSeconds: Int = 60
+    let pipelineFactory: @Sendable () -> _PipelineClosures<Message>
+    var framerFactory: (@Sendable () -> _FramerClosures)? = nil
+
+    /// The identity pipeline: raw bytes through, no decode/encode transform.
+    static func passthrough() -> _BootstrapConfig<ByteBuffer> {
+        _BootstrapConfig<ByteBuffer>(
+            pipelineFactory: {
+                _PipelineClosures(
+                    decode: { buf, emit, _ in emit(buf) },
+                    encode: { $0 },
+                    started: { _ in }
+                )
+            }
+        )
+    }
+
+    /// Re-key this config to a new message type, swapping in a fresh pipeline
+    /// factory while preserving every other field (so `.pipeline()` can't drop
+    /// a previously configured option).
+    func reframed<New: Sendable>(
+        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<New>
+    ) -> _BootstrapConfig<New> {
+        _BootstrapConfig<New>(
+            security: security,
+            udpAssociationTimeoutSeconds: udpAssociationTimeoutSeconds,
+            pipelineFactory: pipelineFactory,
+            framerFactory: framerFactory
+        )
+    }
+}
+
+/// Wrap a `PipelineStage` factory into framer closures.
+private func _makeFramerClosures<F: PipelineStage & SendableMetatype>(
+    _ factory: @escaping @Sendable () -> F
+) -> @Sendable () -> _FramerClosures where F.Input == ByteBuffer, F.Output == ByteBuffer {
+    {
+        let framer = factory()
+        return _FramerClosures(
+            decode: { buf, emit, fail in framer.decode(buf, emit, fail) },
+            encode: { buf in framer.encode(buf) },
+            started: { context in framer.started(context: context) }
+        )
+    }
+}
+
+/// Wrap a `PipelineStage` factory into pipeline closures.
+private func _makePipelineClosures<P: PipelineStage & SendableMetatype>(
+    _ build: @escaping @Sendable () -> P
+) -> @Sendable () -> _PipelineClosures<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
+    {
+        let pipeline = build()
+        return _PipelineClosures(
+            decode: { buf, emit, fail in pipeline.decode(buf, emit, fail) },
+            encode: { msg in pipeline.encode(msg) },
+            started: { context in pipeline.started(context: context) }
+        )
+    }
+}
+
 // MARK: - Client Bootstrap
 
 /// Configures and creates outbound Channels.
@@ -571,47 +636,34 @@ struct _FramerClosures {
 /// `connect(to:)` lives in the active backend file.
 public struct ClientBootstrap<Message: Sendable>: Sendable {
     let wendyNet: WendyNet
-    var security: SecurityMode = .insecure
-    var udpAssociationTimeoutSeconds: Int = 60
-    let _pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    var _framerFactory: (@Sendable () -> _FramerClosures)?
+    var config: _BootstrapConfig<Message>
+
+    // Accessors used by the backend `connect(to:)` extensions.
+    var security: SecurityMode { config.security }
+    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var _pipelineFactory: @Sendable () -> _PipelineClosures<Message> { config.pipelineFactory }
+    var _framerFactory: (@Sendable () -> _FramerClosures)? { config.framerFactory }
 
     /// Create a bootstrap with no pipeline. Produces Channel<ByteBuffer>.
     public init(wendyNet: WendyNet) where Message == ByteBuffer {
         self.wendyNet = wendyNet
-        self._pipelineFactory = {
-            _PipelineClosures(
-                decode: { buf, emit, _ in emit(buf) },
-                encode: { $0 },
-                started: { _ in }
-            )
-        }
-        self._framerFactory = nil
+        self.config = .passthrough()
     }
 
-    init(
-        wendyNet: WendyNet,
-        security: SecurityMode,
-        udpTimeout: Int,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
-    ) {
+    init(wendyNet: WendyNet, config: _BootstrapConfig<Message>) {
         self.wendyNet = wendyNet
-        self.security = security
-        self.udpAssociationTimeoutSeconds = udpTimeout
-        self._pipelineFactory = pipelineFactory
-        self._framerFactory = framerFactory
+        self.config = config
     }
 
     public func security(_ mode: SecurityMode) -> ClientBootstrap {
         var copy = self
-        copy.security = mode
+        copy.config.security = mode
         return copy
     }
 
     public func udpAssociationTimeout(seconds: Int) -> ClientBootstrap {
         var copy = self
-        copy.udpAssociationTimeoutSeconds = seconds
+        copy.config.udpAssociationTimeoutSeconds = seconds
         return copy
     }
 
@@ -621,14 +673,7 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
         _ factory: @escaping @Sendable () -> F
     ) -> ClientBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
-        copy._framerFactory = {
-            let framer = factory()
-            return _FramerClosures(
-                decode: { buf, emit, fail in framer.decode(buf, emit, fail) },
-                encode: { buf in framer.encode(buf) },
-                started: { context in framer.started(context: context) }
-            )
-        }
+        copy.config.framerFactory = _makeFramerClosures(factory)
         return copy
     }
 
@@ -637,20 +682,9 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
     public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ClientBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
-        let framer = _framerFactory
-        return ClientBootstrap<P.Output>(
+        ClientBootstrap<P.Output>(
             wendyNet: wendyNet,
-            security: security,
-            udpTimeout: udpAssociationTimeoutSeconds,
-            pipelineFactory: {
-                let pipeline = build()
-                return _PipelineClosures(
-                    decode: { buf, emit, fail in pipeline.decode(buf, emit, fail) },
-                    encode: { msg in pipeline.encode(msg) },
-                    started: { context in pipeline.started(context: context) }
-                )
-            },
-            framerFactory: framer
+            config: config.reframed(pipelineFactory: _makePipelineClosures(build))
         )
     }
 }
@@ -662,46 +696,33 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 /// `bind(port:)` lives in the active backend file.
 public struct ServerBootstrap<Message: Sendable>: Sendable {
     let wendyNet: WendyNet
-    var security: SecurityMode = .insecure
-    var udpAssociationTimeoutSeconds: Int = 60
-    let _pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    var _framerFactory: (@Sendable () -> _FramerClosures)?
+    var config: _BootstrapConfig<Message>
+
+    // Accessors used by the backend `bind(port:)` extensions.
+    var security: SecurityMode { config.security }
+    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var _pipelineFactory: @Sendable () -> _PipelineClosures<Message> { config.pipelineFactory }
+    var _framerFactory: (@Sendable () -> _FramerClosures)? { config.framerFactory }
 
     public init(wendyNet: WendyNet) where Message == ByteBuffer {
         self.wendyNet = wendyNet
-        self._pipelineFactory = {
-            _PipelineClosures(
-                decode: { buf, emit, _ in emit(buf) },
-                encode: { $0 },
-                started: { _ in }
-            )
-        }
-        self._framerFactory = nil
+        self.config = .passthrough()
     }
 
-    init(
-        wendyNet: WendyNet,
-        security: SecurityMode,
-        udpTimeout: Int,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
-    ) {
+    init(wendyNet: WendyNet, config: _BootstrapConfig<Message>) {
         self.wendyNet = wendyNet
-        self.security = security
-        self.udpAssociationTimeoutSeconds = udpTimeout
-        self._pipelineFactory = pipelineFactory
-        self._framerFactory = framerFactory
+        self.config = config
     }
 
     public func security(_ mode: SecurityMode) -> ServerBootstrap {
         var copy = self
-        copy.security = mode
+        copy.config.security = mode
         return copy
     }
 
     public func udpAssociationTimeout(seconds: Int) -> ServerBootstrap {
         var copy = self
-        copy.udpAssociationTimeoutSeconds = seconds
+        copy.config.udpAssociationTimeoutSeconds = seconds
         return copy
     }
 
@@ -710,14 +731,7 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
         _ factory: @escaping @Sendable () -> F
     ) -> ServerBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
-        copy._framerFactory = {
-            let framer = factory()
-            return _FramerClosures(
-                decode: { buf, emit, fail in framer.decode(buf, emit, fail) },
-                encode: { buf in framer.encode(buf) },
-                started: { context in framer.started(context: context) }
-            )
-        }
+        copy.config.framerFactory = _makeFramerClosures(factory)
         return copy
     }
 
@@ -726,20 +740,9 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
     public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ServerBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
-        let framer = _framerFactory
-        return ServerBootstrap<P.Output>(
+        ServerBootstrap<P.Output>(
             wendyNet: wendyNet,
-            security: security,
-            udpTimeout: udpAssociationTimeoutSeconds,
-            pipelineFactory: {
-                let pipeline = build()
-                return _PipelineClosures(
-                    decode: { buf, emit, fail in pipeline.decode(buf, emit, fail) },
-                    encode: { msg in pipeline.encode(msg) },
-                    started: { context in pipeline.started(context: context) }
-                )
-            },
-            framerFactory: framer
+            config: config.reframed(pipelineFactory: _makePipelineClosures(build))
         )
     }
 }
