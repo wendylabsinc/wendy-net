@@ -546,7 +546,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         }
     }
 
-    private func send(_ message: Message) async throws(WendyNetError) -> SendResult {
+    private func send(_ message: Message) async throws(WendyNetError) {
         // Initial gating: error / closed / cancelled.
         let earlyError: WendyNetError? = state.withLockedValue { s in
             if let err = s.error { return err }
@@ -563,7 +563,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
 
         // Cancellation: close the channel so any in-flight syscall observes EBADF
         // and the parked writable waiter wakes via closeWithError.
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<SendResult, WendyNetError> in
+        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Void, WendyNetError> in
             var offset = 0
             let total = buffer.readableBytes
             while offset < total {
@@ -594,7 +594,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 }
                 if written == 0 {
                     await waitForWritable()
-                    let post: Result<SendResult, WendyNetError>? = state.withLockedValue { s in
+                    let post: Result<Void, WendyNetError>? = state.withLockedValue { s in
                         if let err = s.error { return .failure(err) }
                         if s.closed { return .failure(.closed) }
                         return nil
@@ -606,7 +606,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 let resolved: WendyNetError = state.withLockedValue { s in s.error ?? .closed }
                 return .failure(resolved)
             }
-            return .success(.accepted)
+            return .success(())
         }, onCancel: { [self] in
             let shouldClose: Bool = state.withLockedValue { s in !s.closed && s.error == nil }
             if shouldClose {
@@ -614,7 +614,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             }
         })
         switch result {
-        case .success(let r): return r
+        case .success: return
         case .failure(let err): throw err
         }
     }
@@ -647,8 +647,8 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         })
         let outbound = Outbound<Message>(writeStep: { [self] msg in
             do throws(WendyNetError) {
-                let result = try await send(msg)
-                return .accepted(result)
+                try await send(msg)
+                return .accepted
             } catch {
                 return .failure(error)
             }

@@ -292,10 +292,9 @@ public struct Inbound<Message: Sendable>: Sendable {
 public struct Outbound<Message: Sendable>: Sendable {
     let writeStep: @Sendable (Message) async -> OutboundStep
 
-    @discardableResult
-    public func write(_ msg: Message) async throws(WendyNetError) -> SendResult {
+    public func write(_ msg: Message) async throws(WendyNetError) {
         switch await writeStep(msg) {
-        case .accepted(let r): return r
+        case .accepted: return
         case .failure(let error): throw error
         }
     }
@@ -330,7 +329,7 @@ enum InboundStep<Message: Sendable>: Sendable {
 }
 
 enum OutboundStep: Sendable {
-    case accepted(SendResult)
+    case accepted
     case failure(WendyNetError)
 }
 
@@ -407,16 +406,6 @@ public final class Channel<Message: Sendable>: Sendable {
         self.remotePeerInfo = remotePeerInfo
         self.core = core
     }
-}
-
-// MARK: - Send Result
-
-public enum SendResult: Sendable {
-    /// The message was accepted and enqueued for transmission.
-    case accepted
-
-    /// The transport discarded the message (e.g. lossy UDP under congestion).
-    case dropped
 }
 
 // MARK: - Transport Info

@@ -324,7 +324,7 @@ final class ChannelCore<Message: Sendable>: Sendable {
                         } catch {
                             return .failure(.connectionFailed)
                         }
-                        return .accepted(.accepted)
+                        return .accepted
                     }
                 )
 
