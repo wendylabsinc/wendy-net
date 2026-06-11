@@ -166,7 +166,6 @@ private final class AcceptIteratorBox<Message: Sendable>: Sendable {
         // seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator?
         var ended = false
-        var error: WendyNetError? = nil
     }
     private let state: LockedBox<State>
     private let context: ConnectionContext
@@ -188,7 +187,6 @@ private final class AcceptIteratorBox<Message: Sendable>: Sendable {
     func next() async -> AcceptedStep<Message> {
         // Fast path: terminal state.
         let fast: AcceptedStep<Message>? = state.withLockedValue { s in
-            if let err = s.error { return .failure(err) }
             if s.ended { return .end }
             return nil
         }
