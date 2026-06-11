@@ -40,6 +40,7 @@ let package = Package(
                 .define("WendyNetBackendWendyLite", .when(traits: ["WendyLite"])),
                 .enableExperimentalFeature("Embedded", .when(traits: ["WendyLite"])),
                 .unsafeFlags(["-wmo"], .when(traits: ["WendyLite"])),
+                .treatAllWarnings(as: .error),
             ]
         ),
         .testTarget(
@@ -49,6 +50,7 @@ let package = Package(
             swiftSettings: [
                 .define("WendyNetBackendStandard", .when(traits: ["Standard"])),
                 .define("WendyNetBackendWendyLite", .when(traits: ["WendyLite"])),
+                .treatAllWarnings(as: .error),
             ]
         ),
     ]

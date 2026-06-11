@@ -1,0 +1,57 @@
+name: WendyNet CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  standard:
+    name: Build & Test (Standard / SwiftNIO)
+    runs-on: ubuntu-latest
+    container:
+      image: swift:6.3.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & Test WendyNet
+        run: swift test
+
+  embedded-wasm:
+    name: Build (WendyLite / Embedded WASM)
+    runs-on: ubuntu-latest
+    container:
+      image: swift:6.3.1
+    steps:
+      - uses: actions/checkout@v4
+
+      # NOTE on the cache path: in container jobs GitHub forces HOME=/github/home
+      # and ignores any `env: HOME` override (actions/runner#863). actions/cache
+      # (Node) honours $HOME, but `swift sdk install` resolves the home dir from
+      # the passwd DB (getpwuid -> /root), so the SDK lands in /root/.swiftpm.
+      # We cache that absolute path so the two agree.
+      - name: Cache Swift WASM SDK
+        uses: actions/cache@v4
+        with:
+          path: /root/.swiftpm/swift-sdks
+          key: swift-sdk-wasm-6.3.1
+
+      - name: Install Swift WASM embedded SDK
+        run: |
+          swift sdk list | grep -q swift-6.3.1-RELEASE_wasm-embedded || \
+            swift sdk install \
+              https://download.swift.org/swift-6.3.1-release/wasm-sdk/swift-6.3.1-RELEASE/swift-6.3.1-RELEASE_wasm.artifactbundle.tar.gz \
+              --checksum bd47baa20771f366d8beed7970afaa30742b2210097afd15f85427226d8f4cf2
+
+      - name: Build WendyNet (embedded WASM, WendyLite trait)
+        run: |
+          swift build \
+            --traits WendyLite \
+            --swift-sdk swift-6.3.1-RELEASE_wasm-embedded \
+            --triple wasm32-unknown-wasip1 \
+            -c release
