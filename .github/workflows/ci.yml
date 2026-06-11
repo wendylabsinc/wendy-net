@@ -1,0 +1,54 @@
+name: WendyNet CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  standard:
+    name: Build & Test (Standard / SwiftNIO)
+    runs-on: ubuntu-latest
+    container:
+      image: swift:6.3.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile check (incl. tests)
+        run: swift build --build-tests
+      - name: Run test suite
+        run: swift test
+
+  embedded-wasm:
+    name: Compile (WendyLite / Embedded WASM)
+    runs-on: ubuntu-latest
+    container:
+      image: swift:6.3.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Swift WASM SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.swiftpm/swift-sdks
+          key: swift-sdk-wasm-6.3.1
+
+      - name: Install Swift WASM embedded SDK
+        run: |
+          swift sdk list | grep -q swift-6.3.1-RELEASE_wasm-embedded || \
+            swift sdk install \
+              https://download.swift.org/swift-6.3.1-release/wasm-sdk/swift-6.3.1-RELEASE/swift-6.3.1-RELEASE_wasm.artifactbundle.tar.gz \
+              --checksum bd47baa20771f366d8beed7970afaa30742b2210097afd15f85427226d8f4cf2
+
+      - name: Compile WendyNet (embedded WASM, WendyLite trait)
+        run: |
+          swift build \
+            --traits WendyLite \
+            --swift-sdk swift-6.3.1-RELEASE_wasm-embedded \
+            --triple wasm32-unknown-wasip1 \
+            -c release
