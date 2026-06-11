@@ -29,13 +29,18 @@ public typealias ByteBuffer = NIOCore.ByteBuffer
 /// Slicing returns a new ByteBuffer that shares backing storage via Swift's
 /// built-in Array CoW.
 public struct ByteBuffer: Sendable {
+    // `storage` is shared between a buffer and its slices via Array CoW (no copy
+    // until either side mutates). `base` is the absolute offset within `storage`
+    // of this buffer's logical index 0.
     private var storage: [UInt8] = []
+    private var base: Int = 0
     public private(set) var readerIndex: Int = 0
     public private(set) var writerIndex: Int = 0
 
     public var readableBytes: Int { writerIndex - readerIndex }
-    public var writableBytes: Int { capacity - writerIndex }
-    public var capacity: Int { storage.count }
+    // This implementation does currently not support preallocation.
+    public var writableBytes: Int { 0 }
+    public var capacity: Int { writerIndex }
 
     public init() {}
 
@@ -44,14 +49,14 @@ public struct ByteBuffer: Sendable {
         writerIndex = bytes.count
     }
 
-    // MARK: Slicing (shares storage, no copy)
+    // MARK: Slicing (shares storage via CoW; indices rebased to 0, matching NIO)
 
     public func getSlice(at index: Int, length: Int) -> ByteBuffer? {
-        guard index >= readerIndex, index + length <= writerIndex else { return nil }
-        var slice = ByteBuffer()
-        slice.storage = storage
-        slice.readerIndex = index
-        slice.writerIndex = index + length
+        guard index >= 0, length >= 0, index + length <= writerIndex else { return nil }
+        var slice = self
+        slice.base = base + index
+        slice.readerIndex = 0
+        slice.writerIndex = length
         return slice
     }
 
@@ -70,7 +75,8 @@ public struct ByteBuffer: Sendable {
 
     public mutating func readBytes(length: Int) -> [UInt8]? {
         guard readableBytes >= length else { return nil }
-        let result = Array(storage[readerIndex ..< readerIndex + length])
+        let start = base + readerIndex
+        let result = Array(storage[start ..< start + length])
         readerIndex += length
         return result
     }
@@ -80,7 +86,7 @@ public struct ByteBuffer: Sendable {
         guard readableBytes >= size else { return nil }
         var value: T = 0
         for i in 0 ..< size {
-            value = (value << 8) | T(storage[readerIndex + i])
+            value = (value << 8) | T(storage[base + readerIndex + i])
         }
         readerIndex += size
         return value
@@ -90,10 +96,10 @@ public struct ByteBuffer: Sendable {
 
     public func getInteger<T: FixedWidthInteger>(at index: Int, as type: T.Type = T.self) -> T? {
         let size = MemoryLayout<T>.size
-        guard index >= readerIndex, index + size <= writerIndex else { return nil }
+        guard index >= 0, index + size <= writerIndex else { return nil }
         var value: T = 0
         for i in 0 ..< size {
-            value = (value << 8) | T(storage[index + i])
+            value = (value << 8) | T(storage[base + index + i])
         }
         return value
     }
@@ -103,7 +109,7 @@ public struct ByteBuffer: Sendable {
     public func withUnsafeReadableBytes<R, E: Error>(_ body: (UnsafeRawBufferPointer) throws(E) -> R) throws(E) -> R {
         var captured: Result<R, E>!
         storage.withUnsafeBytes { raw in
-            let readable = UnsafeRawBufferPointer(rebasing: raw[readerIndex ..< writerIndex])
+            let readable = UnsafeRawBufferPointer(rebasing: raw[(base + readerIndex) ..< (base + writerIndex)])
             do throws(E) {
                 captured = .success(try body(readable))
             } catch {
@@ -115,19 +121,20 @@ public struct ByteBuffer: Sendable {
 
     // MARK: Write (advances writerIndex)
 
-    /// Writes `bytes` at `writerIndex`, then advances `writerIndex` past them.
+    /// Writes `bytes` at the physical cursor, then advances `writerIndex`.
     private mutating func writeAtCursor(_ bytes: [UInt8]) {
-        let end = writerIndex + bytes.count
-        if writerIndex == storage.count {
+        let start = base + writerIndex
+        let end = start + bytes.count
+        if start == storage.count {
             storage.append(contentsOf: bytes) // append at end (common case)
         } else if end <= storage.count {
-            storage.replaceSubrange(writerIndex ..< end, with: bytes) // fully overwrite in range
+            storage.replaceSubrange(start ..< end, with: bytes) // fully overwrite in range
         } else {
-            let split = storage.count - writerIndex // overwrite the in-range part
-            storage.replaceSubrange(writerIndex ..< storage.count, with: bytes[..<split])
+            let split = storage.count - start // overwrite the in-range part...
+            storage.replaceSubrange(start ..< storage.count, with: bytes[..<split])
             storage.append(contentsOf: bytes[split...]) // then extend with the rest
         }
-        writerIndex = end
+        writerIndex += bytes.count
     }
 
     @discardableResult
@@ -142,7 +149,8 @@ public struct ByteBuffer: Sendable {
     public mutating func writeBuffer(_ buffer: inout ByteBuffer) -> Int {
         let count = buffer.readableBytes
         guard count > 0 else { return 0 }
-        writeAtCursor(Array(buffer.storage[buffer.readerIndex ..< buffer.writerIndex]))
+        let start = buffer.base + buffer.readerIndex
+        writeAtCursor(Array(buffer.storage[start ..< start + count]))
         buffer.readerIndex += count
         return count
     }
@@ -150,11 +158,12 @@ public struct ByteBuffer: Sendable {
     @discardableResult
     public mutating func writeInteger<T: FixedWidthInteger>(_ value: T) -> Int {
         let size = MemoryLayout<T>.size
-        // Big-endian, written byte-by-byte at the cursor
+        // Big-endian.
         for shift in stride(from: (size - 1) * 8, through: 0, by: -8) {
             let byte = UInt8(truncatingIfNeeded: value >> shift)
-            if writerIndex < storage.count {
-                storage[writerIndex] = byte
+            let pos = base + writerIndex
+            if pos < storage.count {
+                storage[pos] = byte
             } else {
                 storage.append(byte)
             }
@@ -166,7 +175,7 @@ public struct ByteBuffer: Sendable {
     @discardableResult
     public mutating func discardReadBytes() -> Bool {
         guard readerIndex > 0 else { return false }
-        storage.removeFirst(readerIndex)
+        storage.removeSubrange(base ..< base + readerIndex)
         writerIndex -= readerIndex
         readerIndex = 0
         return true
