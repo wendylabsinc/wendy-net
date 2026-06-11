@@ -115,20 +115,34 @@ public struct ByteBuffer: Sendable {
 
     // MARK: Write (advances writerIndex)
 
+    /// Writes `bytes` at `writerIndex`, then advances `writerIndex` past them.
+    private mutating func writeAtCursor(_ bytes: [UInt8]) {
+        let end = writerIndex + bytes.count
+        if writerIndex == storage.count {
+            storage.append(contentsOf: bytes) // append at end (common case)
+        } else if end <= storage.count {
+            storage.replaceSubrange(writerIndex ..< end, with: bytes) // fully overwrite in range
+        } else {
+            let split = storage.count - writerIndex // overwrite the in-range part
+            storage.replaceSubrange(writerIndex ..< storage.count, with: bytes[..<split])
+            storage.append(contentsOf: bytes[split...]) // then extend with the rest
+        }
+        writerIndex = end
+    }
+
     @discardableResult
     public mutating func writeBytes(_ bytes: [UInt8]) -> Int {
-        storage.append(contentsOf: bytes)
-        writerIndex += bytes.count
+        writeAtCursor(bytes)
         return bytes.count
     }
 
-    /// Consumes readable bytes from `buffer` and appends them to `self`.
+    /// Consumes readable bytes from `buffer` and writes them at this buffer's
+    /// write cursor.
     @discardableResult
     public mutating func writeBuffer(_ buffer: inout ByteBuffer) -> Int {
         let count = buffer.readableBytes
         guard count > 0 else { return 0 }
-        storage.append(contentsOf: buffer.storage[buffer.readerIndex ..< buffer.writerIndex])
-        writerIndex += count
+        writeAtCursor(Array(buffer.storage[buffer.readerIndex ..< buffer.writerIndex]))
         buffer.readerIndex += count
         return count
     }
@@ -136,10 +150,16 @@ public struct ByteBuffer: Sendable {
     @discardableResult
     public mutating func writeInteger<T: FixedWidthInteger>(_ value: T) -> Int {
         let size = MemoryLayout<T>.size
-        for i in (0 ..< size).reversed() {
-            storage.append(UInt8(truncatingIfNeeded: value >> (i * 8)))
+        // Big-endian, written byte-by-byte at the cursor
+        for shift in stride(from: (size - 1) * 8, through: 0, by: -8) {
+            let byte = UInt8(truncatingIfNeeded: value >> shift)
+            if writerIndex < storage.count {
+                storage[writerIndex] = byte
+            } else {
+                storage.append(byte)
+            }
+            writerIndex += 1
         }
-        writerIndex += size
         return size
     }
 
