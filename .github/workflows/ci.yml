@@ -32,10 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NOTE on the cache path: in container jobs GitHub forces HOME=/github/home
+      # and ignores any `env: HOME` override (actions/runner#863). actions/cache
+      # (Node) honours $HOME, but `swift sdk install` resolves the home dir from
+      # the passwd DB (getpwuid -> /root), so the SDK lands in /root/.swiftpm.
+      # We cache that absolute path so the two agree.
       - name: Cache Swift WASM SDK
         uses: actions/cache@v4
         with:
-          path: ~/.swiftpm/swift-sdks
+          path: /root/.swiftpm/swift-sdks
           key: swift-sdk-wasm-6.3.1
 
       - name: Install Swift WASM embedded SDK
