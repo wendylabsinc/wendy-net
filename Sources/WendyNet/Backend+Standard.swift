@@ -19,7 +19,7 @@ import _Concurrency
 // and would not accept our `State` containing non-`Sendable` user closures,
 // which is why we need this carrier rather than NIO's stock primitive.
 
-fileprivate final class _LockedBox<T>: @unchecked Sendable {
+fileprivate final class LockedBox<T>: @unchecked Sendable {
     private let lock = NIOLock()
     private var value: T
 
@@ -39,26 +39,60 @@ private let standardEventLoopGroup = MultiThreadedEventLoopGroup.singleton
 fileprivate typealias NIOByteBufferChannel = NIOAsyncChannel<ByteBuffer, ByteBuffer>
 fileprivate typealias NIOServerInboundChannel = NIOAsyncChannel<NIOByteBufferChannel, Never>
 
-// MARK: - Inbound bridge
+// MARK: - Inbound / outbound bridges
 
-private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
+/// Pulls `ByteBuffer`s from a NIO async-channel inbound stream, enforcing the
+/// single-consumer contract: a second concurrent pull observing the claimed-out
+/// iterator surfaces `.concurrentAccess`.
+private final class NIOByteSource: Sendable {
     private struct State {
-        // `iterator` is briefly set to nil while a (single) caller is awaiting
-        // the next NIO buffer outside the lock. A second concurrent `next()`
-        // call seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator?
+    }
+    private let state: LockedBox<State>
+
+    init(iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator) {
+        self.state = LockedBox(State(iterator: iterator))
+    }
+
+    func pull() async -> Result<ByteBuffer?, WendyNetError> {
+        let claimed: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator? =
+            state.withLockedValue { s in
+                let i = s.iterator
+                s.iterator = nil
+                return i
+            }
+        guard var iter = claimed else {
+            return .failure(.concurrentAccess)
+        }
+        let result: Result<ByteBuffer?, WendyNetError>
+        do {
+            result = .success(try await iter.next())
+        } catch is CancellationError {
+            result = .failure(.cancelled)
+        } catch {
+            result = .failure(.connectionFailed)
+        }
+        state.withLockedValue { s in s.iterator = iter }
+        return result
+    }
+}
+
+private final class InboundBridge<Message: Sendable>: Sendable {
+    private struct State {
         var pending: [Message] = []
         var error: WendyNetError? = nil
         var ended = false
         var decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
+    private let pull: @Sendable () async -> Result<ByteBuffer?, WendyNetError>
 
     init(
-        iterator: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator,
-        decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
+        decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void,
+        pull: @escaping @Sendable () async -> Result<ByteBuffer?, WendyNetError>
     ) {
-        self.state = _LockedBox(State(iterator: iterator, decode: decode))
+        self.state = LockedBox(State(decode: decode))
+        self.pull = pull
     }
 
     func next() async -> InboundStep<Message> {
@@ -72,36 +106,16 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
             }
             if let fast { return fast }
 
-            // Claim the iterator out of the box. If it's already nil another
-            // caller is awaiting -- single-consumer contract violated; surface
-            // as `.concurrentAccess`.
-            let claimed: NIOAsyncChannelInboundStream<ByteBuffer>.AsyncIterator? = state.withLockedValue { s in
-                let i = s.iterator
-                s.iterator = nil
-                return i
-            }
-            guard var iter = claimed else {
-                return .failure(.concurrentAccess)
-            }
-
-            // Await outside the lock.
-            let pull: Result<ByteBuffer?, Error>
-            do {
-                let buf = try await iter.next()
-                pull = .success(buf)
-            } catch {
-                pull = .failure(error)
-            }
+            let pulled = await pull()
 
             let result: InboundStep<Message>? = state.withLockedValue { s in
-                s.iterator = iter
-                switch pull {
+                switch pulled {
                 case .success(let bufOpt):
                     guard let buf = bufOpt else {
                         s.ended = true
                         return .end
                     }
-                    // Zero-copy hand-off: pipeline sees NIO's buffer directly.
+                    // Zero-copy hand-off: pipeline sees the source buffer directly.
                     s.decode(buf, { msg in
                         s.pending.append(msg)
                     }, { err in
@@ -109,13 +123,10 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
                     })
                     if let err = s.error { return .failure(err) }
                     if !s.pending.isEmpty { return .message(s.pending.removeFirst()) }
-                    return nil  // loop to deliver from buffered state
+                    return nil  // decoded zero messages; pull again
                 case .failure(let err):
                     s.ended = true
-                    if err is CancellationError {
-                        return .failure(.cancelled)
-                    }
-                    return .failure(.connectionFailed)
+                    return .failure(err)
                 }
             }
             if let result { return result }
@@ -123,60 +134,51 @@ private final class _ByteBufferInboundBridge<Message: Sendable>: Sendable {
     }
 }
 
-// MARK: - Outbound bridge
-
-private final class _ByteBufferOutboundBridge<Message: Sendable>: Sendable {
+private final class OutboundBridge<Message: Sendable>: Sendable {
     private struct State {
         var encode: (Message) -> ByteBuffer
     }
-    private let state: _LockedBox<State>
-    fileprivate let nioOutbound: NIOAsyncChannelOutboundWriter<ByteBuffer>
+    private let state: LockedBox<State>
+    private let sink: @Sendable (ByteBuffer) async -> OutboundStep
 
     init(
-        nioOutbound: NIOAsyncChannelOutboundWriter<ByteBuffer>,
-        encode: @escaping (Message) -> ByteBuffer
+        encode: @escaping (Message) -> ByteBuffer,
+        sink: @escaping @Sendable (ByteBuffer) async -> OutboundStep
     ) {
-        self.nioOutbound = nioOutbound
-        self.state = _LockedBox(State(encode: encode))
+        self.state = LockedBox(State(encode: encode))
+        self.sink = sink
     }
 
     func write(_ msg: Message) async -> OutboundStep {
-        // Zero-copy hand-off: pipeline-produced buffer goes straight to NIO.
+        // Encode under lock (may mutate user stage state); the CoW buffer then
+        // travels to the sink without copying.
         let buf = state.withLockedValue { s in s.encode(msg) }
-        do {
-            try await nioOutbound.write(buf)
-        } catch is CancellationError {
-            return .failure(.cancelled)
-        } catch {
-            return .failure(.connectionFailed)
-        }
-        return .accepted(.accepted)
+        return await sink(buf)
     }
 }
 
 // MARK: - Accept bridge
 
-private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
+private final class AcceptIteratorBox<Message: Sendable>: Sendable {
     private struct State {
         // `iterator` is briefly nil while a (single) caller is awaiting the
         // next accepted connection outside the lock; a second concurrent call
         // seeing nil here surfaces `.concurrentAccess` to the caller.
         var iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator?
         var ended = false
-        var error: WendyNetError? = nil
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
     private let context: ConnectionContext
-    private let pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    private let framerFactory: (@Sendable () -> _FramerClosures)?
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
 
     init(
         iterator: NIOAsyncChannelInboundStream<NIOByteBufferChannel>.AsyncIterator,
         context: ConnectionContext,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
     ) {
-        self.state = _LockedBox(State(iterator: iterator))
+        self.state = LockedBox(State(iterator: iterator))
         self.context = context
         self.pipelineFactory = pipelineFactory
         self.framerFactory = framerFactory
@@ -185,7 +187,6 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
     func next() async -> AcceptedStep<Message> {
         // Fast path: terminal state.
         let fast: AcceptedStep<Message>? = state.withLockedValue { s in
-            if let err = s.error { return .failure(err) }
             if s.ended { return .end }
             return nil
         }
@@ -255,7 +256,7 @@ private final class _AcceptIteratorBox<Message: Sendable>: Sendable {
 
 // MARK: - ChannelCore
 //
-// Sendable. The non-Sendable pipeline closures live inside `_LockedBox<Closures?>`
+// Sendable. The non-Sendable pipeline closures live inside `LockedBox<Closures?>`
 // and are consumed (set to nil) on the first call to `executeThenClose`,
 // after which the bridges own them. A second call sees nil and fatal-errors:
 // `executeThenClose` is documented as one-shot, and two concurrent calls
@@ -271,7 +272,7 @@ final class ChannelCore<Message: Sendable>: Sendable {
         let decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
         let encode: (Message) -> ByteBuffer
     }
-    private let closures: _LockedBox<Closures?>
+    private let closures: LockedBox<Closures?>
 
     fileprivate init(
         nioAsyncChannel: NIOByteBufferChannel,
@@ -283,7 +284,7 @@ final class ChannelCore<Message: Sendable>: Sendable {
         self.nioAsyncChannel = nioAsyncChannel
         self.endpoint = endpoint
         self.transport = transport
-        self.closures = _LockedBox(Closures(decode: decode, encode: encode))
+        self.closures = LockedBox(Closures(decode: decode, encode: encode))
     }
 
     func executeThenClose<R: Sendable>(
@@ -306,19 +307,29 @@ final class ChannelCore<Message: Sendable>: Sendable {
         let outcome: Result<R, WendyNetError>
         do {
             outcome = try await nioAsyncChannel.executeThenClose { nioInbound, nioOutbound -> Result<R, WendyNetError> in
-                let inboundBridge = _ByteBufferInboundBridge<Message>(
-                    iterator: nioInbound.makeAsyncIterator(),
-                    decode: decodeClosure
+                let source = NIOByteSource(iterator: nioInbound.makeAsyncIterator())
+                let inboundBridge = InboundBridge<Message>(
+                    decode: decodeClosure,
+                    pull: { [source] in await source.pull() }
                 )
-                let outboundBridge = _ByteBufferOutboundBridge<Message>(
-                    nioOutbound: nioOutbound,
-                    encode: encodeClosure
+                let outboundBridge = OutboundBridge<Message>(
+                    encode: encodeClosure,
+                    sink: { [nioOutbound] buf in
+                        do {
+                            try await nioOutbound.write(buf)
+                        } catch is CancellationError {
+                            return .failure(.cancelled)
+                        } catch {
+                            return .failure(.connectionFailed)
+                        }
+                        return .accepted
+                    }
                 )
 
-                let inbound = Inbound<Message>(_next: { [inboundBridge] in
+                let inbound = Inbound<Message>(nextStep: { [inboundBridge] in
                     await inboundBridge.next()
                 })
-                let outbound = Outbound<Message>(_write: { [outboundBridge] msg in
+                let outbound = Outbound<Message>(writeStep: { [outboundBridge] msg in
                     await outboundBridge.write(msg)
                 })
 
@@ -348,17 +359,17 @@ final class ListenerCore<Message: Sendable>: Sendable {
     let port: UInt16
     let context: ConnectionContext
     fileprivate let serverChannel: NIOServerInboundChannel
-    private let pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    private let framerFactory: (@Sendable () -> _FramerClosures)?
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
     /// Single-use latch -- see `executeThenClose` for rationale.
-    private let used = _LockedBox<Bool>(false)
+    private let used = LockedBox<Bool>(false)
 
     fileprivate init(
         port: UInt16,
         context: ConnectionContext,
         serverChannel: NIOServerInboundChannel,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
     ) {
         self.port = port
         self.context = context
@@ -390,13 +401,13 @@ final class ListenerCore<Message: Sendable>: Sendable {
         let outcome: Result<R, WendyNetError>
         do {
             outcome = try await serverChannel.executeThenClose { acceptStream -> Result<R, WendyNetError> in
-                let bridge = _AcceptIteratorBox<Message>(
+                let bridge = AcceptIteratorBox<Message>(
                     iterator: acceptStream.makeAsyncIterator(),
                     context: context,
                     pipelineFactory: pipelineFactory,
                     framerFactory: framerFactory
                 )
-                let accepted = Accepted<Message>(_next: { [bridge] in
+                let accepted = Accepted<Message>(nextStep: { [bridge] in
                     await bridge.next()
                 })
 
@@ -437,8 +448,8 @@ extension ClientBootstrap {
         }
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 
@@ -485,8 +496,8 @@ extension ServerBootstrap {
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
 
-        let pipelineFactory = self._pipelineFactory
-        let framerFactory = self._framerFactory
+        let pipelineFactory = self.pipelineFactory
+        let framerFactory = self.framerFactory
 
         let serverChannel: NIOServerInboundChannel
         do {

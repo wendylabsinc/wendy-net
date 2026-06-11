@@ -6,7 +6,7 @@ import _Concurrency
 
 // MARK: - Internal lock primitive
 //
-// `_LockedBox<T>` is a lock-protected carrier for mutable state. It plays
+// `LockedBox<T>` is a lock-protected carrier for mutable state. It plays
 // the combined role of SwiftNIO's `NIOLockedValueBox` (lock-protected
 // mutation of `Sendable` state) and `NIOLoopBoundBox` (carrier of
 // non-`Sendable` state confined by external discipline). The second role
@@ -49,7 +49,7 @@ import _Concurrency
 // ever gains pre-emptive scheduling or multi-threaded executors, the code
 // still works.
 
-fileprivate final class _LockedBox<T>: @unchecked Sendable {
+fileprivate final class LockedBox<T>: @unchecked Sendable {
     private let locked = Atomic<Bool>(false)
     private var value: T
 
@@ -68,6 +68,40 @@ fileprivate final class _LockedBox<T>: @unchecked Sendable {
         defer { locked.store(false, ordering: .releasing) }
         return try body(&value)
     }
+}
+
+// MARK: - Parked-waiter helper
+//
+// The single-parked-continuation pattern shared by the listener's accept loop
+// and the channel's receive loop: poll for a ready value under the state lock,
+// else park one continuation (a second concurrent caller is rejected via
+// `park`), with cancellation taking and resuming the parked waiter. External
+// events (host drain, close) resume the same waiter field directly.
+//
+//   poll:         ready value, or nil to park
+//   park:         store the continuation, or return a value (e.g. concurrentAccess)
+//   cancelWaiter: take and clear the parked continuation
+private func parkOrResume<S, R: Sendable>(
+    _ box: LockedBox<S>,
+    cancelled: R,
+    poll: @escaping @Sendable (inout S) -> R?,
+    park: @escaping @Sendable (inout S, CheckedContinuation<R, Never>) -> R?,
+    cancelWaiter: @escaping @Sendable (inout S) -> CheckedContinuation<R, Never>?
+) async -> R {
+    if let fast = box.withLockedValue({ poll(&$0) }) { return fast }
+    return await withTaskCancellationHandler(operation: {
+        await withCheckedContinuation { (continuation: CheckedContinuation<R, Never>) in
+            let now: R? = box.withLockedValue { s in
+                if Task.isCancelled { return cancelled }
+                if let r = poll(&s) { return r }
+                return park(&s, continuation)
+            }
+            if let now { continuation.resume(returning: now) }
+        }
+    }, onCancel: {
+        let waiter = box.withLockedValue { cancelWaiter(&$0) }
+        waiter?.resume(returning: cancelled)
+    })
 }
 
 private let wendyNetCallbackHandlerID: Int32 = 2
@@ -179,7 +213,7 @@ fileprivate final class WendyNetHub: Sendable {
         var isDraining = false
         var initialized = false
     }
-    private let state = _LockedBox(State())
+    private let state = LockedBox(State())
 
     func ensureInitialized() -> Bool {
         state.withLockedValue { s in
@@ -266,17 +300,17 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         var pendingChannels: [Channel<Message>] = []
         var acceptWaiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? = nil
         var isClosed = false
-        var closures: _PipelineClosures<Message>
+        var closures: PipelineClosures<Message>
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
 
-    init(handle: Int32, port: UInt16, context: ConnectionContext, closures: _PipelineClosures<Message>) {
+    init(handle: Int32, port: UInt16, context: ConnectionContext, closures: PipelineClosures<Message>) {
         self.handle = handle
         self.port = port
         self.context = context
-        self.state = _LockedBox(State(closures: closures))
+        self.state = LockedBox(State(closures: closures))
     }
 
     private func accept() async throws(WendyNetError) -> Channel<Message>? {
@@ -294,43 +328,26 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         }
 
         drainAccepted()
-        let fast2: Result<Channel<Message>?, WendyNetError>? = state.withLockedValue { s in
-            if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
-            if s.isClosed { return .success(nil) }
-            return nil
-        }
-        if let fast2 {
-            switch fast2 {
-            case .success(let c): return c
-            case .failure(let e): throw e
-            }
-        }
 
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Channel<Message>?, WendyNetError> in
-            await withCheckedContinuation { (continuation: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>) in
-                let resume: Result<Channel<Message>?, WendyNetError>? = state.withLockedValue { s in
-                    if Task.isCancelled { return .failure(.cancelled) }
-                    if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
-                    if s.isClosed { return .success(nil) }
-                    if s.acceptWaiter != nil {
-                        return .failure(.concurrentAccess)
-                    }
-                    s.acceptWaiter = continuation
-                    return nil
-                }
-                if let resume {
-                    continuation.resume(returning: resume)
-                }
+        let result = await parkOrResume(
+            state,
+            cancelled: Result<Channel<Message>?, WendyNetError>.failure(.cancelled),
+            poll: { s in
+                if !s.pendingChannels.isEmpty { return .success(s.pendingChannels.removeFirst()) }
+                if s.isClosed { return .success(nil) }
+                return nil
+            },
+            park: { s, continuation in
+                if s.acceptWaiter != nil { return .failure(.concurrentAccess) }
+                s.acceptWaiter = continuation
+                return nil
+            },
+            cancelWaiter: { s in
+                let w = s.acceptWaiter
+                s.acceptWaiter = nil
+                return w
             }
-        }, onCancel: { [self] in
-            let waiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? =
-                state.withLockedValue { s in
-                    let w = s.acceptWaiter
-                    s.acceptWaiter = nil
-                    return w
-                }
-            waiter?.resume(returning: .failure(.cancelled))
-        })
+        )
         switch result {
         case .success(let channel): return channel
         case .failure(let error): throw error
@@ -350,7 +367,7 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
             throw .alreadyConsumed
         }
 
-        let accepted = Accepted<Message>(_next: { [self] in
+        let accepted = Accepted<Message>(nextStep: { [self] in
             do throws(WendyNetError) {
                 if let channel = try await accept() {
                     return .channel(channel)
@@ -469,7 +486,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
-    private let state: _LockedBox<State>
+    private let state: LockedBox<State>
 
     init(
         handle: Int32,
@@ -481,7 +498,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         self.handle = handle
         self.endpoint = endpoint
         self.transport = transport
-        self.state = _LockedBox(State(decode: decode, encode: encode))
+        self.state = LockedBox(State(decode: decode, encode: encode))
     }
 
     private func receive() async throws(WendyNetError) -> Message? {
@@ -493,39 +510,27 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             }
         }
         drainReadable()
-        if let early = tryDeliverReceived() {
-            switch early {
-            case .success(let m): return m
-            case .failure(let e): throw e
-            }
-        }
 
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Message?, WendyNetError> in
-            await withCheckedContinuation { (continuation: CheckedContinuation<Result<Message?, WendyNetError>, Never>) in
-                let resumeNow: Result<Message?, WendyNetError>? = state.withLockedValue { s in
-                    if Task.isCancelled { return .failure(.cancelled) }
-                    if !s.decodedMessages.isEmpty { return .success(s.decodedMessages.removeFirst()) }
-                    if let err = s.error { return .failure(err) }
-                    if s.closed { return .success(nil) }
-                    if s.receiveWaiter != nil {
-                        return .failure(.concurrentAccess)
-                    }
-                    s.receiveWaiter = continuation
-                    return nil
-                }
-                if let resumeNow {
-                    continuation.resume(returning: resumeNow)
-                }
+        let result = await parkOrResume(
+            state,
+            cancelled: Result<Message?, WendyNetError>.failure(.cancelled),
+            poll: { s in
+                if !s.decodedMessages.isEmpty { return .success(s.decodedMessages.removeFirst()) }
+                if let err = s.error { return .failure(err) }
+                if s.closed { return .success(nil) }
+                return nil
+            },
+            park: { s, continuation in
+                if s.receiveWaiter != nil { return .failure(.concurrentAccess) }
+                s.receiveWaiter = continuation
+                return nil
+            },
+            cancelWaiter: { s in
+                let w = s.receiveWaiter
+                s.receiveWaiter = nil
+                return w
             }
-        }, onCancel: { [self] in
-            let waiter: CheckedContinuation<Result<Message?, WendyNetError>, Never>? =
-                state.withLockedValue { s in
-                    let w = s.receiveWaiter
-                    s.receiveWaiter = nil
-                    return w
-                }
-            waiter?.resume(returning: .failure(.cancelled))
-        })
+        )
         switch result {
         case .success(let message): return message
         case .failure(let error): throw error
@@ -541,7 +546,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         }
     }
 
-    private func send(_ message: Message) async throws(WendyNetError) -> SendResult {
+    private func send(_ message: Message) async throws(WendyNetError) {
         // Initial gating: error / closed / cancelled.
         let earlyError: WendyNetError? = state.withLockedValue { s in
             if let err = s.error { return err }
@@ -558,7 +563,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
 
         // Cancellation: close the channel so any in-flight syscall observes EBADF
         // and the parked writable waiter wakes via closeWithError.
-        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<SendResult, WendyNetError> in
+        let result = await withTaskCancellationHandler(operation: { [self] () async -> Result<Void, WendyNetError> in
             var offset = 0
             let total = buffer.readableBytes
             while offset < total {
@@ -589,7 +594,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 }
                 if written == 0 {
                     await waitForWritable()
-                    let post: Result<SendResult, WendyNetError>? = state.withLockedValue { s in
+                    let post: Result<Void, WendyNetError>? = state.withLockedValue { s in
                         if let err = s.error { return .failure(err) }
                         if s.closed { return .failure(.closed) }
                         return nil
@@ -601,7 +606,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 let resolved: WendyNetError = state.withLockedValue { s in s.error ?? .closed }
                 return .failure(resolved)
             }
-            return .success(.accepted)
+            return .success(())
         }, onCancel: { [self] in
             let shouldClose: Bool = state.withLockedValue { s in !s.closed && s.error == nil }
             if shouldClose {
@@ -609,7 +614,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             }
         })
         switch result {
-        case .success(let r): return r
+        case .success: return
         case .failure(let err): throw err
         }
     }
@@ -630,7 +635,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
             throw .alreadyConsumed
         }
 
-        let inbound = Inbound<Message>(_next: { [self] in
+        let inbound = Inbound<Message>(nextStep: { [self] in
             do throws(WendyNetError) {
                 if let msg = try await receive() {
                     return .message(msg)
@@ -640,10 +645,10 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 return .failure(error)
             }
         })
-        let outbound = Outbound<Message>(_write: { [self] msg in
+        let outbound = Outbound<Message>(writeStep: { [self] msg in
             do throws(WendyNetError) {
-                let result = try await send(msg)
-                return .accepted(result)
+                try await send(msg)
+                return .accepted
             } catch {
                 return .failure(error)
             }
@@ -889,8 +894,8 @@ extension ClientBootstrap {
         }
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 
@@ -934,8 +939,8 @@ extension ServerBootstrap {
 
         let transport = TransportInfo(kind: .tcp, isStream: true)
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
-        var closures = _pipelineFactory()
-        if let framerFactory = _framerFactory {
+        var closures = pipelineFactory()
+        if let framerFactory = framerFactory {
             closures = framerFactory().composing(closures)
         }
 

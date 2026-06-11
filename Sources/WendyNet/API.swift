@@ -6,8 +6,6 @@ import _Concurrency
 #error("WendyNet: enable exactly one of the 'Standard' or 'WendyLite' traits.")
 #endif
 
-let wendyNetMaximumMessageLength = 1024
-
 // MARK: - ByteBuffer
 
 #if WendyNetBackendStandard
@@ -31,51 +29,55 @@ public typealias ByteBuffer = NIOCore.ByteBuffer
 /// Slicing returns a new ByteBuffer that shares backing storage via Swift's
 /// built-in Array CoW.
 public struct ByteBuffer: Sendable {
-    private var _storage: [UInt8] = []
-    private var _readerIndex: Int = 0
-    private var _writerIndex: Int = 0
+    // `storage` is shared between a buffer and its slices via Array CoW (no copy
+    // until either side mutates). `base` is the absolute offset within `storage`
+    // of this buffer's logical index 0.
+    private var storage: [UInt8] = []
+    private var base: Int = 0
+    public private(set) var readerIndex: Int = 0
+    public private(set) var writerIndex: Int = 0
 
-    public var readerIndex: Int { _readerIndex }
-    public var writerIndex: Int { _writerIndex }
-    public var readableBytes: Int { _writerIndex - _readerIndex }
-    public var writableBytes: Int { capacity - _writerIndex }
-    public var capacity: Int { _storage.count }
+    public var readableBytes: Int { writerIndex - readerIndex }
+    // This implementation does currently not support preallocation.
+    public var writableBytes: Int { 0 }
+    public var capacity: Int { writerIndex }
 
     public init() {}
 
     public init(bytes: [UInt8]) {
-        _storage = bytes
-        _writerIndex = bytes.count
+        storage = bytes
+        writerIndex = bytes.count
     }
 
-    // MARK: Slicing (shares storage, no copy)
+    // MARK: Slicing (shares storage via CoW; indices rebased to 0, matching NIO)
 
     public func getSlice(at index: Int, length: Int) -> ByteBuffer? {
-        guard index >= _readerIndex, index + length <= _writerIndex else { return nil }
-        var slice = ByteBuffer()
-        slice._storage = _storage
-        slice._readerIndex = index
-        slice._writerIndex = index + length
+        guard index >= 0, length >= 0, index + length <= writerIndex else { return nil }
+        var slice = self
+        slice.base = base + index
+        slice.readerIndex = 0
+        slice.writerIndex = length
         return slice
     }
 
     public mutating func readSlice(length: Int) -> ByteBuffer? {
         guard readableBytes >= length else { return nil }
-        let slice = getSlice(at: _readerIndex, length: length)
-        _readerIndex += length
+        let slice = getSlice(at: readerIndex, length: length)
+        readerIndex += length
         return slice
     }
 
     public mutating func moveReaderIndex(forwardBy count: Int) {
-        _readerIndex += count
+        readerIndex += count
     }
 
     // MARK: Copying reads (advance readerIndex)
 
     public mutating func readBytes(length: Int) -> [UInt8]? {
         guard readableBytes >= length else { return nil }
-        let result = Array(_storage[_readerIndex ..< _readerIndex + length])
-        _readerIndex += length
+        let start = base + readerIndex
+        let result = Array(storage[start ..< start + length])
+        readerIndex += length
         return result
     }
 
@@ -84,9 +86,9 @@ public struct ByteBuffer: Sendable {
         guard readableBytes >= size else { return nil }
         var value: T = 0
         for i in 0 ..< size {
-            value = (value << 8) | T(_storage[_readerIndex + i])
+            value = (value << 8) | T(storage[base + readerIndex + i])
         }
-        _readerIndex += size
+        readerIndex += size
         return value
     }
 
@@ -94,10 +96,10 @@ public struct ByteBuffer: Sendable {
 
     public func getInteger<T: FixedWidthInteger>(at index: Int, as type: T.Type = T.self) -> T? {
         let size = MemoryLayout<T>.size
-        guard index >= _readerIndex, index + size <= _writerIndex else { return nil }
+        guard index >= 0, index + size <= writerIndex else { return nil }
         var value: T = 0
         for i in 0 ..< size {
-            value = (value << 8) | T(_storage[index + i])
+            value = (value << 8) | T(storage[base + index + i])
         }
         return value
     }
@@ -106,8 +108,8 @@ public struct ByteBuffer: Sendable {
     /// is only valid for the duration of `body`.
     public func withUnsafeReadableBytes<R, E: Error>(_ body: (UnsafeRawBufferPointer) throws(E) -> R) throws(E) -> R {
         var captured: Result<R, E>!
-        _storage.withUnsafeBytes { raw in
-            let readable = UnsafeRawBufferPointer(rebasing: raw[_readerIndex ..< _writerIndex])
+        storage.withUnsafeBytes { raw in
+            let readable = UnsafeRawBufferPointer(rebasing: raw[(base + readerIndex) ..< (base + writerIndex)])
             do throws(E) {
                 captured = .success(try body(readable))
             } catch {
@@ -119,40 +121,63 @@ public struct ByteBuffer: Sendable {
 
     // MARK: Write (advances writerIndex)
 
+    /// Writes `bytes` at the physical cursor, then advances `writerIndex`.
+    private mutating func writeAtCursor(_ bytes: [UInt8]) {
+        let start = base + writerIndex
+        let end = start + bytes.count
+        if start == storage.count {
+            storage.append(contentsOf: bytes) // append at end (common case)
+        } else if end <= storage.count {
+            storage.replaceSubrange(start ..< end, with: bytes) // fully overwrite in range
+        } else {
+            let split = storage.count - start // overwrite the in-range part...
+            storage.replaceSubrange(start ..< storage.count, with: bytes[..<split])
+            storage.append(contentsOf: bytes[split...]) // then extend with the rest
+        }
+        writerIndex += bytes.count
+    }
+
     @discardableResult
     public mutating func writeBytes(_ bytes: [UInt8]) -> Int {
-        _storage.append(contentsOf: bytes)
-        _writerIndex += bytes.count
+        writeAtCursor(bytes)
         return bytes.count
     }
 
-    /// Consumes readable bytes from `buffer` and appends them to `self`.
+    /// Consumes readable bytes from `buffer` and writes them at this buffer's
+    /// write cursor.
     @discardableResult
     public mutating func writeBuffer(_ buffer: inout ByteBuffer) -> Int {
         let count = buffer.readableBytes
         guard count > 0 else { return 0 }
-        _storage.append(contentsOf: buffer._storage[buffer._readerIndex ..< buffer._writerIndex])
-        _writerIndex += count
-        buffer._readerIndex += count
+        let start = buffer.base + buffer.readerIndex
+        writeAtCursor(Array(buffer.storage[start ..< start + count]))
+        buffer.readerIndex += count
         return count
     }
 
     @discardableResult
     public mutating func writeInteger<T: FixedWidthInteger>(_ value: T) -> Int {
         let size = MemoryLayout<T>.size
-        for i in (0 ..< size).reversed() {
-            _storage.append(UInt8(truncatingIfNeeded: value >> (i * 8)))
+        // Big-endian.
+        for shift in stride(from: (size - 1) * 8, through: 0, by: -8) {
+            let byte = UInt8(truncatingIfNeeded: value >> shift)
+            let pos = base + writerIndex
+            if pos < storage.count {
+                storage[pos] = byte
+            } else {
+                storage.append(byte)
+            }
+            writerIndex += 1
         }
-        _writerIndex += size
         return size
     }
 
     @discardableResult
     public mutating func discardReadBytes() -> Bool {
-        guard _readerIndex > 0 else { return false }
-        _storage.removeFirst(_readerIndex)
-        _writerIndex -= _readerIndex
-        _readerIndex = 0
+        guard readerIndex > 0 else { return false }
+        storage.removeSubrange(base ..< base + readerIndex)
+        writerIndex -= readerIndex
+        readerIndex = 0
         return true
     }
 }
@@ -275,10 +300,10 @@ public struct PipelineBuilder {
 /// from a concurrent context that contends with another such call throws
 /// `WendyNetError.concurrentAccess`.
 public struct Inbound<Message: Sendable>: Sendable {
-    let _next: @Sendable () async -> InboundStep<Message>
+    let nextStep: @Sendable () async -> InboundStep<Message>
 
     public func next() async throws(WendyNetError) -> Message? {
-        switch await _next() {
+        switch await nextStep() {
         case .message(let m): return m
         case .end: return nil
         case .failure(let error): throw error
@@ -292,12 +317,11 @@ public struct Inbound<Message: Sendable>: Sendable {
 /// send is suspended (waiting for backpressure relief or transport completion)
 /// it throws `.cancelled`.
 public struct Outbound<Message: Sendable>: Sendable {
-    let _write: @Sendable (Message) async -> OutboundStep
+    let writeStep: @Sendable (Message) async -> OutboundStep
 
-    @discardableResult
-    public func write(_ msg: Message) async throws(WendyNetError) -> SendResult {
-        switch await _write(msg) {
-        case .accepted(let r): return r
+    public func write(_ msg: Message) async throws(WendyNetError) {
+        switch await writeStep(msg) {
+        case .accepted: return
         case .failure(let error): throw error
         }
     }
@@ -313,33 +337,15 @@ public struct Outbound<Message: Sendable>: Sendable {
 /// from a concurrent context that contends with another such call throws
 /// `WendyNetError.concurrentAccess`.
 public struct Accepted<Message: Sendable>: Sendable {
-    let _next: @Sendable () async -> AcceptedStep<Message>
+    let nextStep: @Sendable () async -> AcceptedStep<Message>
 
     public func next() async throws(WendyNetError) -> Channel<Message>? {
-        switch await _next() {
+        switch await nextStep() {
         case .channel(let c): return c
         case .end: return nil
         case .failure(let error): throw error
         }
     }
-}
-
-/// Internal step results.
-enum InboundStep<Message: Sendable>: Sendable {
-    case message(Message)
-    case end
-    case failure(WendyNetError)
-}
-
-enum OutboundStep: Sendable {
-    case accepted(SendResult)
-    case failure(WendyNetError)
-}
-
-enum AcceptedStep<Message: Sendable>: Sendable {
-    case channel(Channel<Message>)
-    case end
-    case failure(WendyNetError)
 }
 
 // MARK: - Channel
@@ -377,7 +383,7 @@ public final class Channel<Message: Sendable>: Sendable {
     /// Present after mTLS handshake with a Wendy peer.
     public let remotePeerInfo: PeerInfo?
 
-    let _core: ChannelCore<Message>?
+    let core: ChannelCore<Message>?
 
     /// Drive the channel inside a structured scope.
     ///
@@ -390,7 +396,7 @@ public final class Channel<Message: Sendable>: Sendable {
     public func executeThenClose<R: Sendable>(
         _ body: @Sendable (Inbound<Message>, Outbound<Message>) async throws(WendyNetError) -> R
     ) async throws(WendyNetError) -> R {
-        guard let core = _core else {
+        guard let core = core else {
             throw .connectionFailed
         }
         return try await core.executeThenClose(body)
@@ -407,18 +413,8 @@ public final class Channel<Message: Sendable>: Sendable {
         self.transport = transport
         self.maximumMessageLength = maximumMessageLength
         self.remotePeerInfo = remotePeerInfo
-        self._core = core
+        self.core = core
     }
-}
-
-// MARK: - Send Result
-
-public enum SendResult: Sendable {
-    /// The message was accepted and enqueued for transmission.
-    case accepted
-
-    /// The transport discarded the message (e.g. lossy UDP under congestion).
-    case dropped
 }
 
 // MARK: - Transport Info
@@ -518,44 +514,6 @@ public final class Listener<Message: Sendable>: Sendable {
     }
 }
 
-// MARK: - Pipeline Closures
-
-/// Closure bundle produced by a pipeline factory.
-struct _PipelineClosures<Message> {
-    let decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
-    let encode: (Message) -> ByteBuffer
-    let started: (ConnectionContext) -> Void
-}
-
-/// Closure bundle for a framer (ByteBuffer -> ByteBuffer, stream transports only).
-struct _FramerClosures {
-    let decode: (ByteBuffer, (ByteBuffer) -> Void, (WendyNetError) -> Void) -> Void
-    let encode: (ByteBuffer) -> ByteBuffer
-    let started: (ConnectionContext) -> Void
-
-    /// Wrap a pipeline's closures so the framer runs first on inbound
-    /// and last on outbound.
-    func composing<Message>(_ inner: _PipelineClosures<Message>) -> _PipelineClosures<Message> {
-        let framerDecode = self.decode
-        let framerEncode = self.encode
-        let framerStarted = self.started
-        return _PipelineClosures<Message>(
-            decode: { buf, emit, fail in
-                framerDecode(buf, { frameBuf in
-                    inner.decode(frameBuf, emit, fail)
-                }, fail)
-            },
-            encode: { msg in
-                framerEncode(inner.encode(msg))
-            },
-            started: { context in
-                framerStarted(context)
-                inner.started(context)
-            }
-        )
-    }
-}
-
 // MARK: - Client Bootstrap
 
 /// Configures and creates outbound Channels.
@@ -571,47 +529,34 @@ struct _FramerClosures {
 /// `connect(to:)` lives in the active backend file.
 public struct ClientBootstrap<Message: Sendable>: Sendable {
     let wendyNet: WendyNet
-    var security: SecurityMode = .insecure
-    var udpAssociationTimeoutSeconds: Int = 60
-    let _pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    var _framerFactory: (@Sendable () -> _FramerClosures)?
+    var config: BootstrapConfig<Message>
+
+    // Accessors used by the backend `connect(to:)` extensions.
+    var security: SecurityMode { config.security }
+    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var pipelineFactory: @Sendable () -> PipelineClosures<Message> { config.pipelineFactory }
+    var framerFactory: (@Sendable () -> FramerClosures)? { config.framerFactory }
 
     /// Create a bootstrap with no pipeline. Produces Channel<ByteBuffer>.
     public init(wendyNet: WendyNet) where Message == ByteBuffer {
         self.wendyNet = wendyNet
-        self._pipelineFactory = {
-            _PipelineClosures(
-                decode: { buf, emit, _ in emit(buf) },
-                encode: { $0 },
-                started: { _ in }
-            )
-        }
-        self._framerFactory = nil
+        self.config = .passthrough()
     }
 
-    init(
-        wendyNet: WendyNet,
-        security: SecurityMode,
-        udpTimeout: Int,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
-    ) {
+    init(wendyNet: WendyNet, config: BootstrapConfig<Message>) {
         self.wendyNet = wendyNet
-        self.security = security
-        self.udpAssociationTimeoutSeconds = udpTimeout
-        self._pipelineFactory = pipelineFactory
-        self._framerFactory = framerFactory
+        self.config = config
     }
 
     public func security(_ mode: SecurityMode) -> ClientBootstrap {
         var copy = self
-        copy.security = mode
+        copy.config.security = mode
         return copy
     }
 
     public func udpAssociationTimeout(seconds: Int) -> ClientBootstrap {
         var copy = self
-        copy.udpAssociationTimeoutSeconds = seconds
+        copy.config.udpAssociationTimeoutSeconds = seconds
         return copy
     }
 
@@ -621,14 +566,7 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
         _ factory: @escaping @Sendable () -> F
     ) -> ClientBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
-        copy._framerFactory = {
-            let framer = factory()
-            return _FramerClosures(
-                decode: { buf, emit, fail in framer.decode(buf, emit, fail) },
-                encode: { buf in framer.encode(buf) },
-                started: { context in framer.started(context: context) }
-            )
-        }
+        copy.config.framerFactory = makeFramerClosures(factory)
         return copy
     }
 
@@ -637,20 +575,9 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
     public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ClientBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
-        let framer = _framerFactory
-        return ClientBootstrap<P.Output>(
+        ClientBootstrap<P.Output>(
             wendyNet: wendyNet,
-            security: security,
-            udpTimeout: udpAssociationTimeoutSeconds,
-            pipelineFactory: {
-                let pipeline = build()
-                return _PipelineClosures(
-                    decode: { buf, emit, fail in pipeline.decode(buf, emit, fail) },
-                    encode: { msg in pipeline.encode(msg) },
-                    started: { context in pipeline.started(context: context) }
-                )
-            },
-            framerFactory: framer
+            config: config.reframed(pipelineFactory: makePipelineClosures(build))
         )
     }
 }
@@ -662,46 +589,33 @@ public struct ClientBootstrap<Message: Sendable>: Sendable {
 /// `bind(port:)` lives in the active backend file.
 public struct ServerBootstrap<Message: Sendable>: Sendable {
     let wendyNet: WendyNet
-    var security: SecurityMode = .insecure
-    var udpAssociationTimeoutSeconds: Int = 60
-    let _pipelineFactory: @Sendable () -> _PipelineClosures<Message>
-    var _framerFactory: (@Sendable () -> _FramerClosures)?
+    var config: BootstrapConfig<Message>
+
+    // Accessors used by the backend `bind(port:)` extensions.
+    var security: SecurityMode { config.security }
+    var udpAssociationTimeoutSeconds: Int { config.udpAssociationTimeoutSeconds }
+    var pipelineFactory: @Sendable () -> PipelineClosures<Message> { config.pipelineFactory }
+    var framerFactory: (@Sendable () -> FramerClosures)? { config.framerFactory }
 
     public init(wendyNet: WendyNet) where Message == ByteBuffer {
         self.wendyNet = wendyNet
-        self._pipelineFactory = {
-            _PipelineClosures(
-                decode: { buf, emit, _ in emit(buf) },
-                encode: { $0 },
-                started: { _ in }
-            )
-        }
-        self._framerFactory = nil
+        self.config = .passthrough()
     }
 
-    init(
-        wendyNet: WendyNet,
-        security: SecurityMode,
-        udpTimeout: Int,
-        pipelineFactory: @escaping @Sendable () -> _PipelineClosures<Message>,
-        framerFactory: (@Sendable () -> _FramerClosures)?
-    ) {
+    init(wendyNet: WendyNet, config: BootstrapConfig<Message>) {
         self.wendyNet = wendyNet
-        self.security = security
-        self.udpAssociationTimeoutSeconds = udpTimeout
-        self._pipelineFactory = pipelineFactory
-        self._framerFactory = framerFactory
+        self.config = config
     }
 
     public func security(_ mode: SecurityMode) -> ServerBootstrap {
         var copy = self
-        copy.security = mode
+        copy.config.security = mode
         return copy
     }
 
     public func udpAssociationTimeout(seconds: Int) -> ServerBootstrap {
         var copy = self
-        copy.udpAssociationTimeoutSeconds = seconds
+        copy.config.udpAssociationTimeoutSeconds = seconds
         return copy
     }
 
@@ -710,14 +624,7 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
         _ factory: @escaping @Sendable () -> F
     ) -> ServerBootstrap where F.Input == ByteBuffer, F.Output == ByteBuffer {
         var copy = self
-        copy._framerFactory = {
-            let framer = factory()
-            return _FramerClosures(
-                decode: { buf, emit, fail in framer.decode(buf, emit, fail) },
-                encode: { buf in framer.encode(buf) },
-                started: { context in framer.started(context: context) }
-            )
-        }
+        copy.config.framerFactory = makeFramerClosures(factory)
         return copy
     }
 
@@ -726,20 +633,9 @@ public struct ServerBootstrap<Message: Sendable>: Sendable {
     public func pipeline<P: PipelineStage & SendableMetatype>(
         @PipelineBuilder _ build: @escaping @Sendable () -> P
     ) -> ServerBootstrap<P.Output> where P.Input == ByteBuffer, P.Output: Sendable {
-        let framer = _framerFactory
-        return ServerBootstrap<P.Output>(
+        ServerBootstrap<P.Output>(
             wendyNet: wendyNet,
-            security: security,
-            udpTimeout: udpAssociationTimeoutSeconds,
-            pipelineFactory: {
-                let pipeline = build()
-                return _PipelineClosures(
-                    decode: { buf, emit, fail in pipeline.decode(buf, emit, fail) },
-                    encode: { msg in pipeline.encode(msg) },
-                    started: { context in pipeline.started(context: context) }
-                )
-            },
-            framerFactory: framer
+            config: config.reframed(pipelineFactory: makePipelineClosures(build))
         )
     }
 }
@@ -861,7 +757,7 @@ public struct DiscoveryOptions: Sendable {
 public enum SecurityMode: Sendable {
     case wendyPeer
     case insecure
-    case tls(tls: TLSOptions)
+    case tls(TLSOptions)
 }
 
 public struct TLSOptions: Sendable {
