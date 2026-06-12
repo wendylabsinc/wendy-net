@@ -322,11 +322,15 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
     /// Idle timeout applied to each accepted UDP association (`.zero` for TCP,
     /// which disables it).
     let udpAssociationTimeout: Duration
+    // A fresh pipeline is built per accepted connection so peers never share
+    // stage state.
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
+    private let isStream: Bool
     private struct State {
         var pendingChannels: [Channel<Message>] = []
         var acceptWaiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? = nil
         var isClosed = false
-        var closures: PipelineClosures<Message>
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
@@ -337,13 +341,18 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         port: UInt16,
         context: ConnectionContext,
         udpAssociationTimeout: Duration,
-        closures: PipelineClosures<Message>
+        isStream: Bool,
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
     ) {
         self.handle = handle
         self.port = port
         self.context = context
         self.udpAssociationTimeout = udpAssociationTimeout
-        self.state = LockedBox(State(closures: closures))
+        self.isStream = isStream
+        self.pipelineFactory = pipelineFactory
+        self.framerFactory = framerFactory
+        self.state = LockedBox(State())
     }
 
     private func accept() async throws(WendyNetError) -> Channel<Message>? {
@@ -431,37 +440,41 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         while true {
             let socketHandle = WendyNetNative.accept(listenerHandle: handle)
             if socketHandle > 0 {
-                // Build a fresh channel core under our lock so the per-connection
-                // closures are constructed once and stay confined to that core.
-                let (channelCore, channel): (ChannelCore<Message>, Channel<Message>) =
-                    state.withLockedValue { s in
-                        let core = ChannelCore<Message>(
-                            handle: socketHandle,
-                            endpoint: context.remoteEndpoint,
-                            transport: context.transport,
-                            idleTimeout: udpAssociationTimeout,
-                            decode: s.closures.decode,
-                            encode: s.closures.encode
-                        )
-                        let channel = Channel<Message>(
-                            endpoint: context.remoteEndpoint,
-                            transport: context.transport,
-                            maximumMessageLength: wendyNetMaximumMessageLength,
-                            core: core
-                        )
-                        return (core, channel)
-                    }
-                WendyNetState.shared.register(channel: channelCore)
+                var closures = pipelineFactory()
+                if let framerFactory, isStream {
+                    closures = framerFactory().composing(closures)
+                }
+                let core = ChannelCore<Message>(
+                    handle: socketHandle,
+                    endpoint: context.remoteEndpoint,
+                    transport: context.transport,
+                    idleTimeout: udpAssociationTimeout,
+                    decode: closures.decode,
+                    encode: closures.encode
+                )
+                let channel = Channel<Message>(
+                    endpoint: context.remoteEndpoint,
+                    transport: context.transport,
+                    maximumMessageLength: wendyNetMaximumMessageLength,
+                    core: core
+                )
 
-                let resume: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? =
+                let (resume, dropped): (CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>?, Bool) =
                     state.withLockedValue { s in
+                        if s.isClosed { return (nil, true) }
                         if let waiter = s.acceptWaiter {
                             s.acceptWaiter = nil
-                            return waiter
+                            return (waiter, false)
                         }
                         s.pendingChannels.append(channel)
-                        return nil
+                        return (nil, false)
                     }
+                if dropped {
+                    WendyNetNative.closeSocket(socketHandle)
+                    continue
+                }
+                closures.started(context)
+                WendyNetState.shared.register(channel: core)
                 resume?.resume(returning: .success(channel))
                 continue
             }
@@ -979,7 +992,6 @@ extension ClientBootstrap {
         }
 
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
-        closures.started(context)
 
         let core = ChannelCore<Message>(
             handle: handle,
@@ -997,6 +1009,8 @@ extension ClientBootstrap {
             WendyNetNative.closeSocket(handle)
             throw error
         }
+
+        closures.started(context)
 
         return Channel(
             endpoint: endpoint,
@@ -1018,15 +1032,7 @@ extension ServerBootstrap {
         let isStream = reliability == .reliable
         let transport = TransportInfo(kind: isStream ? .tcp : .udp, isStream: isStream)
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
-        var closures = pipelineFactory()
-        // Framers are only meaningful on stream transports; datagrams already
-        // carry message boundaries.
-        if let framerFactory = framerFactory, isStream {
-            closures = framerFactory().composing(closures)
-        }
-
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
-        closures.started(context)
 
         let handle: Int32
         if isStream {
@@ -1053,7 +1059,9 @@ extension ServerBootstrap {
             port: resolvedPort,
             context: context,
             udpAssociationTimeout: isStream ? .zero : udpAssociationTimeout,
-            closures: closures
+            isStream: isStream,
+            pipelineFactory: pipelineFactory,
+            framerFactory: framerFactory
         )
         WendyNetState.shared.register(listener: core)
         return Listener(port: resolvedPort, core: core)

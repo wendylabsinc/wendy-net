@@ -123,4 +123,52 @@ func udpServerSeesMultiplePeersAsDistinctChannels() async throws {
 
     #expect(seen.value.sorted() == ["from-a", "from-b"])
 }
+
+/// Passthrough stage that records the identity of each instance whose `started`
+/// hook fires, so a test can prove peers don't share a pipeline.
+private final class CountingStage: PipelineStage, @unchecked Sendable {
+    typealias Input = ByteBuffer
+    typealias Output = ByteBuffer
+    let startedIDs: TestBox<[ObjectIdentifier]>
+    init(startedIDs: TestBox<[ObjectIdentifier]>) { self.startedIDs = startedIDs }
+    func started(context: ConnectionContext) {
+        startedIDs.value.append(ObjectIdentifier(self))
+    }
+    func decode(_ input: ByteBuffer, _ emit: (ByteBuffer) -> Void, _ fail: (WendyNetError) -> Void) {
+        emit(input)
+    }
+    func encode(_ output: ByteBuffer) -> ByteBuffer { output }
+}   
+
+@Test
+func udpServerBuildsIndependentPipelinePerPeer() async throws {
+    let net = WendyNet()
+    let startedIDs = TestBox<[ObjectIdentifier]>([])
+
+    let listener = try await ServerBootstrap(wendyNet: net)
+        .reliability(.unreliable)
+        .pipeline { CountingStage(startedIDs: startedIDs) }
+        .bind(port: 0)
+
+    let seen = TestBox<[String]>([])
+    let serverTask = Task {
+        try? await acceptTwoAndCollect(listener: listener, seen: seen)
+    }
+
+    let clientA = try await ClientBootstrap(wendyNet: net)
+        .reliability(.unreliable)
+        .connect(to: Endpoint(hostname: "127.0.0.1", port: listener.port))
+    let clientB = try await ClientBootstrap(wendyNet: net)
+        .reliability(.unreliable)
+        .connect(to: Endpoint(hostname: "127.0.0.1", port: listener.port))
+
+    try await sendOne(client: clientA, text: "from-a")
+    try await sendOne(client: clientB, text: "from-b")
+
+    _ = await serverTask.value
+
+    #expect(seen.value.sorted() == ["from-a", "from-b"])
+    #expect(startedIDs.value.count == 2, "each peer should get its own started() call")
+    #expect(Set(startedIDs.value).count == 2, "peers must not share a pipeline stage instance")
+}
 #endif
