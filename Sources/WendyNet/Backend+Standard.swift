@@ -492,7 +492,6 @@ fileprivate final class UDPDemuxHub<Message: Sendable>: Sendable {
             security: context.security
         )
         let closures = pipelineFactory()
-        closures.started(peerContext)
 
         let core = ChannelCore<Message>(
             udpConduit: conduit,
@@ -521,6 +520,7 @@ fileprivate final class UDPDemuxHub<Message: Sendable>: Sendable {
                 return (nil, false)
             }
         if dropped { return }
+        closures.started(peerContext)
         conduit.deliver(envelope.data)
         waiter?.resume(returning: .channel(channel))
     }
@@ -978,7 +978,6 @@ extension ClientBootstrap {
         }
 
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
-        closures.started(context)
 
         let nioAsyncChannel: NIOByteBufferChannel
         do {
@@ -1007,6 +1006,8 @@ extension ClientBootstrap {
         } catch {
             throw .connectionFailed
         }
+
+        closures.started(context)
 
         let core = ChannelCore<Message>(
             nioAsyncChannel: nioAsyncChannel,
