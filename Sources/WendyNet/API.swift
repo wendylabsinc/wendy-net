@@ -435,7 +435,7 @@ public struct TransportInfo: Sendable {
     }
 }
 
-public enum TransportKind: Sendable {
+@nonexhaustive public enum TransportKind: Sendable {
     case tcp
     case udp
     case bluetoothL2CAP
@@ -453,7 +453,7 @@ public enum TransportKind: Sendable {
 /// `write` only means the datagram was handed to the transport; there is no
 /// per-write delivery signal. Framers are not applied; datagrams already carry
 /// their own message boundaries.
-public enum Reliability: Sendable {
+@nonexhaustive public enum Reliability: Sendable {
     case reliable
     case unreliable
 }
@@ -707,7 +707,7 @@ public final class WendyNet: Sendable {
 
 // MARK: - Discovery
 
-public enum DiscoveryEvent: Sendable {
+@nonexhaustive public enum DiscoveryEvent: Sendable {
     case peerDiscovered(DiscoveredPeer)
     case peerLost(DiscoveredPeer)
 }
@@ -722,7 +722,7 @@ public struct DiscoveryStream: Sendable {
 
 // MARK: - Errors
 
-public enum WendyNetError: Error, Sendable {
+@nonexhaustive public enum WendyNetError: Error, Sendable {
     case discoveryError
     case listenerError
     case connectionFailed
@@ -746,7 +746,7 @@ public enum WendyNetError: Error, Sendable {
 
 // MARK: - Endpoint
 
-public enum Endpoint: Sendable {
+@nonexhaustive public enum Endpoint: Sendable {
     case wendyPeer(publicKey: String, port: UInt16)
     case ipHost(hostname: String, port: UInt16)
 
@@ -797,7 +797,7 @@ public struct DiscoveryOptions: Sendable {
 
 // MARK: - Security
 
-public enum SecurityMode: Sendable {
+@nonexhaustive public enum SecurityMode: Sendable {
     case wendyPeer
     case insecure
     case tls(TLSOptions)
@@ -812,7 +812,7 @@ public struct TLSOptions: Sendable {
     public init() {}
 }
 
-public enum CertificateRoots: Sendable {
+@nonexhaustive public enum CertificateRoots: Sendable {
     case system
     case webPKI
     case custom([String])
