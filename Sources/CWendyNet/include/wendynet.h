@@ -1,7 +1,7 @@
 #ifndef CWENDYNET_H
 #define CWENDYNET_H
 
-/* WendyNet async TCP host imports.
+/* WendyNet async TCP/UDP host imports.
  *
  * Imports under module "wendy" are merged at link time with declarations
  * from CWendyLite (and any other host-import target) into a single WASM
@@ -30,6 +30,12 @@ int wendynet_tcp_listen(int port, int backlog);
 
 __attribute__((import_module("wendy"), import_name("wendynet_tcp_connect")))
 int wendynet_tcp_connect(const char *host, int host_len, int port);
+
+__attribute__((import_module("wendy"), import_name("wendynet_udp_listen")))
+int wendynet_udp_listen(int port);
+
+__attribute__((import_module("wendy"), import_name("wendynet_udp_connect")))
+int wendynet_udp_connect(const char *host, int host_len, int port);
 
 __attribute__((import_module("wendy"), import_name("wendynet_listener_accept")))
 int wendynet_listener_accept(int listener_handle);

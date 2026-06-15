@@ -70,6 +70,9 @@ fileprivate final class LockedBox<T>: @unchecked Sendable {
     }
 }
 
+/// Guest-side UDP receive buffer. Must be >= the host's CONFIG_WENDY_NET_BUFFER_SIZE.
+private let wendyNetDatagramBufferSize = 1500
+
 // MARK: - Parked-waiter helper
 //
 // The single-parked-continuation pattern shared by the listener's accept loop
@@ -135,15 +138,35 @@ private enum WendyNetNative {
         wendynet_tcp_listen(Int32(port), backlog)
     }
 
-    static func connect(hostname: String, port: UInt16) -> Int32 {
+    /// Marshal a hostname into the `(const char *, int32 len)` pair the host
+    /// imports expect. Returns -1 for an empty string (no base address).
+    private static func withHostname(
+        _ hostname: String,
+        _ body: (UnsafePointer<CChar>, Int32) -> Int32
+    ) -> Int32 {
         let bytes = Array(hostname.utf8)
         return bytes.withUnsafeBufferPointer { ptr in
             guard let baseAddress = ptr.baseAddress else { return -1 }
-            return wendynet_tcp_connect(
+            return body(
                 UnsafeRawPointer(baseAddress).assumingMemoryBound(to: CChar.self),
-                Int32(ptr.count),
-                Int32(port)
+                Int32(ptr.count)
             )
+        }
+    }
+
+    static func connect(hostname: String, port: UInt16) -> Int32 {
+        withHostname(hostname) { ptr, len in
+            wendynet_tcp_connect(ptr, len, Int32(port))
+        }
+    }
+
+    static func udpListen(port: UInt16) -> Int32 {
+        wendynet_udp_listen(Int32(port))
+    }
+
+    static func udpConnect(hostname: String, port: UInt16) -> Int32 {
+        withHostname(hostname) { ptr, len in
+            wendynet_udp_connect(ptr, len, Int32(port))
         }
     }
 
@@ -296,21 +319,40 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
     let handle: Int32
     let port: UInt16
     let context: ConnectionContext
+    /// Idle timeout applied to each accepted UDP association (`.zero` for TCP,
+    /// which disables it).
+    let udpAssociationTimeout: Duration
+    // A fresh pipeline is built per accepted connection so peers never share
+    // stage state.
+    private let pipelineFactory: @Sendable () -> PipelineClosures<Message>
+    private let framerFactory: (@Sendable () -> FramerClosures)?
+    private let isStream: Bool
     private struct State {
         var pendingChannels: [Channel<Message>] = []
         var acceptWaiter: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? = nil
         var isClosed = false
-        var closures: PipelineClosures<Message>
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
     private let state: LockedBox<State>
 
-    init(handle: Int32, port: UInt16, context: ConnectionContext, closures: PipelineClosures<Message>) {
+    init(
+        handle: Int32,
+        port: UInt16,
+        context: ConnectionContext,
+        udpAssociationTimeout: Duration,
+        isStream: Bool,
+        pipelineFactory: @escaping @Sendable () -> PipelineClosures<Message>,
+        framerFactory: (@Sendable () -> FramerClosures)?
+    ) {
         self.handle = handle
         self.port = port
         self.context = context
-        self.state = LockedBox(State(closures: closures))
+        self.udpAssociationTimeout = udpAssociationTimeout
+        self.isStream = isStream
+        self.pipelineFactory = pipelineFactory
+        self.framerFactory = framerFactory
+        self.state = LockedBox(State())
     }
 
     private func accept() async throws(WendyNetError) -> Channel<Message>? {
@@ -398,36 +440,41 @@ final class ListenerCore<Message: Sendable>: AnyListenerCore, Sendable {
         while true {
             let socketHandle = WendyNetNative.accept(listenerHandle: handle)
             if socketHandle > 0 {
-                // Build a fresh channel core under our lock so the per-connection
-                // closures are constructed once and stay confined to that core.
-                let (channelCore, channel): (ChannelCore<Message>, Channel<Message>) =
-                    state.withLockedValue { s in
-                        let core = ChannelCore<Message>(
-                            handle: socketHandle,
-                            endpoint: context.remoteEndpoint,
-                            transport: context.transport,
-                            decode: s.closures.decode,
-                            encode: s.closures.encode
-                        )
-                        let channel = Channel<Message>(
-                            endpoint: context.remoteEndpoint,
-                            transport: context.transport,
-                            maximumMessageLength: wendyNetMaximumMessageLength,
-                            core: core
-                        )
-                        return (core, channel)
-                    }
-                WendyNetState.shared.register(channel: channelCore)
+                var closures = pipelineFactory()
+                if let framerFactory, isStream {
+                    closures = framerFactory().composing(closures)
+                }
+                let core = ChannelCore<Message>(
+                    handle: socketHandle,
+                    endpoint: context.remoteEndpoint,
+                    transport: context.transport,
+                    idleTimeout: udpAssociationTimeout,
+                    decode: closures.decode,
+                    encode: closures.encode
+                )
+                let channel = Channel<Message>(
+                    endpoint: context.remoteEndpoint,
+                    transport: context.transport,
+                    maximumMessageLength: wendyNetMaximumMessageLength,
+                    core: core
+                )
 
-                let resume: CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>? =
+                let (resume, dropped): (CheckedContinuation<Result<Channel<Message>?, WendyNetError>, Never>?, Bool) =
                     state.withLockedValue { s in
+                        if s.isClosed { return (nil, true) }
                         if let waiter = s.acceptWaiter {
                             s.acceptWaiter = nil
-                            return waiter
+                            return (waiter, false)
                         }
                         s.pendingChannels.append(channel)
-                        return nil
+                        return (nil, false)
                     }
+                if dropped {
+                    WendyNetNative.closeSocket(socketHandle)
+                    continue
+                }
+                closures.started(context)
+                WendyNetState.shared.register(channel: core)
                 resume?.resume(returning: .success(channel))
                 continue
             }
@@ -475,6 +522,9 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
     let handle: Int32
     let endpoint: Endpoint
     let transport: TransportInfo
+    /// Idle timeout for a UDP-listener association (`.zero` for TCP / clients,
+    /// which disables it).
+    let idleTimeout: Duration
     private struct State {
         var decode: (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void
         var encode: (Message) -> ByteBuffer
@@ -483,6 +533,8 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         var writableWaiter: CheckedContinuation<Void, Never>? = nil
         var closed = false
         var error: WendyNetError? = nil
+        /// Last inbound/outbound activity, for idle reaping.
+        var lastActivity: WendyClock.Instant
         /// Single-use latch -- see `executeThenClose` for rationale.
         var executeThenCloseUsed = false
     }
@@ -492,13 +544,25 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
         handle: Int32,
         endpoint: Endpoint,
         transport: TransportInfo,
+        idleTimeout: Duration = .zero,
         decode: @escaping (ByteBuffer, (Message) -> Void, (WendyNetError) -> Void) -> Void,
         encode: @escaping (Message) -> ByteBuffer
     ) {
         self.handle = handle
         self.endpoint = endpoint
         self.transport = transport
-        self.state = LockedBox(State(decode: decode, encode: encode))
+        self.idleTimeout = idleTimeout
+        self.state = LockedBox(State(decode: decode, encode: encode, lastActivity: WendyClock().now))
+    }
+
+    /// Time left before the idle deadline (`idleTimeout` since the last
+    /// activity): `nil` once closed/errored, `<= .zero` once expired.
+    private func idleRemaining() -> Duration? {
+        state.withLockedValue { s in
+            (s.closed || s.error != nil)
+                ? nil
+                : idleTimeout - s.lastActivity.duration(to: WendyClock().now)
+        }
     }
 
     private func receive() async throws(WendyNetError) -> Message? {
@@ -606,6 +670,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 let resolved: WendyNetError = state.withLockedValue { s in s.error ?? .closed }
                 return .failure(resolved)
             }
+            state.withLockedValue { s in s.lastActivity = WendyClock().now }
             return .success(())
         }, onCancel: { [self] in
             let shouldClose: Bool = state.withLockedValue { s in !s.closed && s.error == nil }
@@ -653,14 +718,32 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 return .failure(error)
             }
         })
-        let outcome: Result<R, WendyNetError>
-        do throws(WendyNetError) {
-            let value = try await body(inbound, outbound)
-            outcome = .success(value)
-        } catch {
-            outcome = .failure(error)
-        }
-        await close()
+
+        // Run the body alongside the association's idle timer; cancelling the
+        // group when the body returns tears the timer down with the channel.
+        // If the timer fires first it closes the channel, surfacing
+        // end-of-stream to the body.
+        let outcome: Result<R, WendyNetError> =
+            await withTaskGroup(of: Void.self, returning: Result<R, WendyNetError>.self) { group in
+                if idleTimeout > .zero {
+                    group.addTask { [self] in
+                        await runIdleTimer(
+                            remaining: { [self] in idleRemaining() },
+                            sleep: { d in (try? await WendyClock().sleep(for: d)) != nil },
+                            evict: { [self] in await close() }
+                        )
+                    }
+                }
+                let result: Result<R, WendyNetError>
+                do throws(WendyNetError) {
+                    result = .success(try await body(inbound, outbound))
+                } catch {
+                    result = .failure(error)
+                }
+                await close()
+                group.cancelAll()
+                return result
+            }
         switch outcome {
         case .success(let v): return v
         case .failure(let e): throw e
@@ -670,7 +753,8 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
     func drainReadable() {
         let alreadyDone: Bool = state.withLockedValue { s in s.closed || s.error != nil }
         if alreadyDone { return }
-        var buffer = [UInt8](repeating: 0, count: 256)
+        // Sized to hold one whole UDP datagram (see wendyNetDatagramBufferSize).
+        var buffer = [UInt8](repeating: 0, count: wendyNetDatagramBufferSize)
 
         while true {
             let read = WendyNetNative.recv(socketHandle: handle, into: &buffer)
@@ -678,6 +762,7 @@ final class ChannelCore<Message: Sendable>: AnyChannelCore, Sendable {
                 let input = ByteBuffer(bytes: Array(buffer[0 ..< Int(read)]))
                 let waiterToResume: (CheckedContinuation<Result<Message?, WendyNetError>, Never>, Result<Message?, WendyNetError>)? =
                     state.withLockedValue { s -> (CheckedContinuation<Result<Message?, WendyNetError>, Never>, Result<Message?, WendyNetError>)? in
+                        s.lastActivity = WendyClock().now
                         s.decode(input, { message in
                             s.decodedMessages.append(message)
                         }, { failure in
@@ -873,7 +958,6 @@ extension ClientBootstrap {
     /// Connect to an endpoint. TAPS-style transport racing happens internally.
     public func connect(to endpoint: Endpoint) async throws(WendyNetError) -> Channel<Message> {
         let _ = security
-        let _ = udpAssociationTimeoutSeconds
         guard WendyNetState.shared.ensureInitialized() else {
             throw .connectionFailed
         }
@@ -888,19 +972,26 @@ extension ClientBootstrap {
             throw .connectionFailed
         }
 
-        let handle = WendyNetNative.connect(hostname: hostname, port: port)
+        let isStream = reliability == .reliable
+        let handle: Int32
+        if isStream {
+            handle = WendyNetNative.connect(hostname: hostname, port: port)
+        } else {
+            handle = WendyNetNative.udpConnect(hostname: hostname, port: port)
+        }
         if handle <= 0 {
             throw .connectionFailed
         }
 
-        let transport = TransportInfo(kind: .tcp, isStream: true)
+        let transport = TransportInfo(kind: isStream ? .tcp : .udp, isStream: isStream)
         var closures = pipelineFactory()
-        if let framerFactory = framerFactory {
+        // Framers are only meaningful on stream transports; datagrams already
+        // carry message boundaries.
+        if let framerFactory = framerFactory, isStream {
             closures = framerFactory().composing(closures)
         }
 
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
-        closures.started(context)
 
         let core = ChannelCore<Message>(
             handle: handle,
@@ -919,6 +1010,8 @@ extension ClientBootstrap {
             throw error
         }
 
+        closures.started(context)
+
         return Channel(
             endpoint: endpoint,
             transport: transport,
@@ -932,22 +1025,21 @@ extension ServerBootstrap {
     /// Bind to a port.
     public func bind(port: UInt16) async throws(WendyNetError) -> Listener<Message> {
         let _ = wendyNet
-        let _ = udpAssociationTimeoutSeconds
         guard WendyNetState.shared.ensureInitialized() else {
             throw .listenerError
         }
 
-        let transport = TransportInfo(kind: .tcp, isStream: true)
+        let isStream = reliability == .reliable
+        let transport = TransportInfo(kind: isStream ? .tcp : .udp, isStream: isStream)
         let endpoint = Endpoint.ipHost(hostname: "0.0.0.0", port: port)
-        var closures = pipelineFactory()
-        if let framerFactory = framerFactory {
-            closures = framerFactory().composing(closures)
-        }
-
         let context = ConnectionContext(remoteEndpoint: endpoint, transport: transport, security: security)
-        closures.started(context)
 
-        let handle = WendyNetNative.listen(port: port, backlog: 4)
+        let handle: Int32
+        if isStream {
+            handle = WendyNetNative.listen(port: port, backlog: 4)
+        } else {
+            handle = WendyNetNative.udpListen(port: port)
+        }
         if handle <= 0 {
             throw .listenerError
         }
@@ -962,7 +1054,15 @@ extension ServerBootstrap {
         }
         let resolvedPort = UInt16(resolvedRaw)
 
-        let core = ListenerCore<Message>(handle: handle, port: resolvedPort, context: context, closures: closures)
+        let core = ListenerCore<Message>(
+            handle: handle,
+            port: resolvedPort,
+            context: context,
+            udpAssociationTimeout: isStream ? .zero : udpAssociationTimeout,
+            isStream: isStream,
+            pipelineFactory: pipelineFactory,
+            framerFactory: framerFactory
+        )
         WendyNetState.shared.register(listener: core)
         return Listener(port: resolvedPort, core: core)
     }
